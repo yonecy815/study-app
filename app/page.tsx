@@ -108,6 +108,13 @@ export default function Home() {
   const [selectedProblemIds, setSelectedProblemIds] = useState<number[]>([]);
   const [assignedProblems, setAssignedProblems] = useState<Problem[]>([]);
 
+  // --- 学習設定用 ---
+  const [studyProblemCount, setStudyProblemCount] = useState<number>(10);
+  const [showStudySettings, setShowStudySettings] = useState(false);
+  const [studyMode, setStudyMode] = useState<"homework" | "self">("self");
+  const [studyIsWeak, setStudyIsWeak] = useState(false);
+  const [studySelectedFolders, setStudySelectedFolders] = useState<string[]>([]);
+
   // --- 初期化 ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -210,17 +217,56 @@ export default function Home() {
 
   const [todaysHomeworks, setTodaysHomeworks] = useState<string[]>([]);
   const fetchHomeworkButton = async (userId: string) => {
-    const today = new Date().toISOString().split("T")[0];
-    const { data } = await supabase
+    const now = new Date();
+
+    // 全ての宿題（過去・今日・未来）を取得
+    const { data: allHomeworks } = await supabase
       .from("homeworks")
-      .select("folder_name")
+      .select("folder_name, assigned_date")
       .eq("student_id", userId)
-      .eq("assigned_date", today);
-    if (data && data.length > 0) {
-      setTodaysHomeworks(Array.from(new Set(data.map((d) => d.folder_name))));
-    } else {
+      .order("assigned_date", { ascending: false });
+
+    if (!allHomeworks || allHomeworks.length === 0) {
       setTodaysHomeworks([]);
+      return;
     }
+
+    // 生徒の問題を取得
+    const { data: studentProblems } = await supabase
+      .from("student_problems")
+      .select("problem_id, problems(*)")
+      .eq("student_id", userId);
+
+    if (!studentProblems) {
+      setTodaysHomeworks([]);
+      return;
+    }
+
+    const problems = studentProblems.map((sp: any) => sp.problems).filter(Boolean);
+
+    // 未完了の宿題フォルダを抽出
+    const incompleteHomeworks: string[] = [];
+    const uniqueFolders = Array.from(new Set(allHomeworks.map((h) => h.folder_name)));
+
+    for (const folderName of uniqueFolders) {
+      // このフォルダの問題を取得
+      const folderProblems = problems.filter((p: Problem) => p.subject === folderName);
+
+      if (folderProblems.length === 0) continue;
+
+      // 全ての問題が正解済み（next_review_atが未来）かチェック
+      const allCompleted = folderProblems.every((p: Problem) => {
+        const nextReview = new Date(p.next_review_at);
+        return nextReview > now;
+      });
+
+      // 未完了なら宿題リストに追加
+      if (!allCompleted) {
+        incompleteHomeworks.push(folderName);
+      }
+    }
+
+    setTodaysHomeworks(incompleteHomeworks);
   };
 
   // --- 認証 ---
@@ -947,12 +993,25 @@ export default function Home() {
       sorted = data.sort(() => Math.random() - 0.5);
     }
 
-    setProblems(sorted);
+    // 問題数を制限（設定された数まで）
+    const limitedProblems = sorted.slice(0, studyProblemCount);
+
+    // 各問題に「今回未正解」フラグを初期化
+    const problemsWithFlags = limitedProblems.map((p) => ({
+      ...p,
+      is_correct: false,
+    }));
+
+    setProblems(problemsWithFlags);
     setCurrentIndex(0);
     setShowAnswer(false);
     setFinished(false);
     setMode("study");
     setStatus("");
+  };
+
+  const startStudyWithSettings = () => {
+    setShowStudySettings(true);
   };
 
   const handleResult = async (isCorrect: boolean) => {
@@ -968,9 +1027,10 @@ export default function Home() {
     const recent3 = newHistory.slice(-3);
     const isMastered =
       recent3.length >= 3 && recent3.every((h) => h.result === "○");
-    let nextReview = now;
+    let nextReview = new Date(now);
     if (isCorrect) nextReview.setDate(now.getDate() + 1);
 
+    // データベースを更新
     await supabase
       .from("problems")
       .update({
@@ -982,15 +1042,42 @@ export default function Home() {
       })
       .eq("id", current.id);
 
-    if (!isCorrect)
-      setProblems((prev) => [...prev, { ...current, history: newHistory }]);
+    let remainingProblems: Problem[];
 
-    if (currentIndex + 1 < problems.length) {
-      setCurrentIndex(currentIndex + 1);
-      setShowAnswer(false);
+    if (isCorrect) {
+      // 正解した場合、この問題をリストから除外（翌日まで出題しない）
+      remainingProblems = problems.filter((_, idx) => idx !== currentIndex);
     } else {
-      setFinished(true);
+      // 不正解の場合、この問題を末尾に移動（繰り返し学習）
+      const updatedCurrent = { ...current, history: newHistory };
+      remainingProblems = [
+        ...problems.slice(0, currentIndex),
+        ...problems.slice(currentIndex + 1),
+        updatedCurrent,
+      ];
     }
+
+    // 残りの問題がない場合は終了
+    if (remainingProblems.length === 0) {
+      setFinished(true);
+      setStatus("");
+      return;
+    }
+
+    // 問題リストを更新
+    setProblems(remainingProblems);
+
+    // 次のインデックスを設定
+    if (currentIndex >= remainingProblems.length) {
+      // 最後の問題だった場合は先頭に戻る
+      setCurrentIndex(0);
+    } else {
+      // そのまま同じインデックス（次の問題）
+      setCurrentIndex(currentIndex);
+    }
+
+    setShowAnswer(false);
+    setStatus("");
   };
 
   const copyToClipboard = () => {
@@ -2073,13 +2160,23 @@ export default function Home() {
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <button
-                      onClick={() => startStudy(true, true)}
+                      onClick={() => {
+                        setStudyMode("homework");
+                        setStudyIsWeak(true);
+                        setStudySelectedFolders(todaysHomeworks);
+                        setShowStudySettings(true);
+                      }}
                       className="bg-orange-600 text-white p-4 rounded-xl font-bold shadow-lg hover:bg-orange-700"
                     >
                       🔥 宿題特訓
                     </button>
                     <button
-                      onClick={() => startStudy(false, true)}
+                      onClick={() => {
+                        setStudyMode("homework");
+                        setStudyIsWeak(false);
+                        setStudySelectedFolders(todaysHomeworks);
+                        setShowStudySettings(true);
+                      }}
                       className="bg-orange-400 text-white p-4 rounded-xl font-bold shadow hover:bg-orange-500"
                     >
                       📝 宿題全問
@@ -2113,14 +2210,24 @@ export default function Home() {
               </div>
               <div className="grid gap-3">
                 <button
-                  onClick={() => startStudy(true)}
+                  onClick={() => {
+                    setStudyMode("self");
+                    setStudyIsWeak(true);
+                    setStudySelectedFolders(selectedFolders);
+                    setShowStudySettings(true);
+                  }}
                   disabled={selectedFolders.length === 0}
                   className="bg-blue-600 disabled:bg-gray-300 text-white p-4 rounded-xl font-bold shadow"
                 >
                   🔥 苦手特訓 (自主)
                 </button>
                 <button
-                  onClick={() => startStudy(false)}
+                  onClick={() => {
+                    setStudyMode("self");
+                    setStudyIsWeak(false);
+                    setStudySelectedFolders(selectedFolders);
+                    setShowStudySettings(true);
+                  }}
                   disabled={selectedFolders.length === 0}
                   className="bg-blue-400 disabled:bg-gray-300 text-white p-4 rounded-xl font-bold shadow"
                 >
@@ -2150,6 +2257,98 @@ export default function Home() {
                   📊 出力
                 </button>
               </div>
+
+              {/* 学習設定モーダル */}
+              {showStudySettings && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                  <div className="bg-white rounded-xl p-6 max-w-md w-full space-y-4">
+                    <h3 className="font-bold text-xl text-gray-800">
+                      {studyMode === "homework" ? "🏠 宿題設定" : "📚 自主学習設定"}
+                    </h3>
+
+                    {/* フォルダ選択（宿題モードでは表示） */}
+                    {studyMode === "homework" && (
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">
+                          📁 宿題のフォルダ
+                        </label>
+                        <div className="flex flex-wrap gap-2 mb-3">
+                          {studySelectedFolders.map((f) => (
+                            <button
+                              key={f}
+                              onClick={() => {
+                                setStudySelectedFolders((prev) =>
+                                  prev.includes(f)
+                                    ? prev.filter((folder) => folder !== f)
+                                    : [...prev, f]
+                                );
+                              }}
+                              className={`px-3 py-1 rounded-full text-sm font-bold border ${
+                                studySelectedFolders.includes(f)
+                                  ? "bg-orange-500 text-white"
+                                  : "bg-gray-100"
+                              }`}
+                            >
+                              {studySelectedFolders.includes(f) ? "✓ " : ""}
+                              {f}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 問題数選択 */}
+                    <div>
+                      <label className="block text-sm font-bold text-gray-700 mb-2">
+                        🔢 問題数を選択
+                      </label>
+                      <p className="text-xs text-gray-500 mb-2">
+                        選んだ問題数の中で、全問正解するまで繰り返します
+                      </p>
+                      <div className="grid grid-cols-4 gap-2">
+                        {[5, 10, 15, 20, 30, 50, 100, 999].map((count) => (
+                          <button
+                            key={count}
+                            onClick={() => setStudyProblemCount(count)}
+                            className={`p-2 rounded font-bold text-sm ${
+                              studyProblemCount === count
+                                ? "bg-indigo-600 text-white"
+                                : "bg-gray-100 text-gray-700"
+                            }`}
+                          >
+                            {count === 999 ? "全部" : `${count}問`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 開始ボタン */}
+                    <div className="flex gap-2 pt-4">
+                      <button
+                        onClick={() => setShowStudySettings(false)}
+                        className="flex-1 bg-gray-400 text-white p-3 rounded-lg font-bold hover:bg-gray-500"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowStudySettings(false);
+                          if (studyMode === "homework") {
+                            selectedFolders.length = 0;
+                            selectedFolders.push(...studySelectedFolders);
+                            startStudy(studyIsWeak, true);
+                          } else {
+                            startStudy(studyIsWeak, false);
+                          }
+                        }}
+                        className="flex-1 bg-indigo-600 text-white p-3 rounded-lg font-bold hover:bg-indigo-700"
+                      >
+                        学習開始！
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ) : mode === "study" && !finished ? (
             // --- 学習画面 ---
@@ -2198,7 +2397,7 @@ export default function Home() {
                   </button>
                 ) : (
                   <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
-                    <p className="text-3xl font-bold text-red-600 mb-4 font-[family-name:var(--font-noto-serif-jp)]">
+                    <p className="text-5xl font-bold text-red-600 mb-6 font-[family-name:var(--font-noto-serif-jp)]">
                       {problems[currentIndex].answer_text}
                     </p>
                     <p className="text-gray-600 mb-8 bg-gray-50 p-4 rounded text-left border-l-4 border-gray-300 font-[family-name:var(--font-noto-serif-jp)]">
