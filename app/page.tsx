@@ -783,14 +783,22 @@ export default function Home() {
 
   // --- 先生管理関連 ---
   const fetchAllTeachers = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("profiles")
       .select("*")
       .eq("is_teacher", true)
       .order("created_at", { ascending: false });
 
+    if (error) {
+      console.error("先生一覧の取得エラー:", error);
+      setStatus(`❌ 先生一覧の取得に失敗しました: ${error.message}`);
+      setAllTeachers([]);
+      return;
+    }
+
     if (data) {
       setAllTeachers(data);
+      console.log("取得した先生:", data);
     }
   };
 
@@ -875,9 +883,9 @@ export default function Home() {
     }
   };
 
-  const openTeacherManagement = () => {
-    fetchAllTeachers();
+  const openTeacherManagement = async () => {
     setShowTeacherManagement(true);
+    await fetchAllTeachers();
   };
 
   // 問題割り当て関連
