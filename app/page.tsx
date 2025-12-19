@@ -786,8 +786,7 @@ export default function Home() {
     const { data, error } = await supabase
       .from("profiles")
       .select("*")
-      .eq("is_teacher", true)
-      .order("created_at", { ascending: false });
+      .eq("is_teacher", true);
 
     if (error) {
       console.error("先生一覧の取得エラー:", error);

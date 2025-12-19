@@ -86,8 +86,7 @@ export async function POST(req: NextRequest) {
         teacher_password,
         invite_code,
         student_limit,
-        has_unlimited_license,
-        created_at: new Date().toISOString()
+        has_unlimited_license
       });
 
     if (profileError) {
