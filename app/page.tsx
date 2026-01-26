@@ -35,11 +35,20 @@ type Profile = {
   student_limit?: number;
   has_unlimited_license?: boolean;
 };
+type Message = {
+  id: number;
+  teacher_id: string;
+  student_id: string;
+  message_text: string;
+  created_at: string;
+  is_read: boolean;
+};
 
 export default function Home() {
   const [session, setSession] = useState<any>(null);
   const [status, setStatus] = useState("");
   const [mode, setMode] = useState("menu");
+  const [isAdminMode, setIsAdminMode] = useState(false); // 管理者モード
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -138,14 +147,26 @@ export default function Home() {
   const [newTeacherUnlimited, setNewTeacherUnlimited] = useState(false);
   const [editingTeacher, setEditingTeacher] = useState<Profile | null>(null);
 
+  // --- メッセージ機能用 ---
+  const [showMessageModal, setShowMessageModal] = useState(false);
+  const [messageTargetStudent, setMessageTargetStudent] = useState<Profile | null>(null);
+  const [messageText, setMessageText] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+
   // --- 初期化 ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session) {
+        // 管理者チェック
+        if (session.user.email === 'info@yonema.tokyo') {
+          setIsAdminMode(true);
+        }
         fetchFolders(session.user.id);
         fetchHomeworkButton(session.user.id);
         fetchUserProfile(session.user.id);
+        fetchMessages();
         setMyPageName(session.user.user_metadata.full_name || "");
         setMyPageEmail(session.user.email || "");
       }
@@ -155,14 +176,22 @@ export default function Home() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       if (session) {
+        // 管理者チェック
+        if (session.user.email === 'info@yonema.tokyo') {
+          setIsAdminMode(true);
+        } else {
+          setIsAdminMode(false);
+        }
         fetchFolders(session.user.id);
         fetchHomeworkButton(session.user.id);
         fetchUserProfile(session.user.id);
+        fetchMessages();
         setMyPageName(session.user.user_metadata.full_name || "");
         setMyPageEmail(session.user.email || "");
       } else {
         setMode("menu");
         setIsTeacherMode(false);
+        setIsAdminMode(false);
       }
     });
     return () => subscription.unsubscribe();
@@ -186,7 +215,6 @@ export default function Home() {
       setFolderCounts(counts);
       const folders = Object.keys(counts).sort();
       setAvailableFolders(folders);
-      if (selectedFolders.length === 0) setSelectedFolders(folders);
     }
   };
 
@@ -236,6 +264,50 @@ export default function Home() {
       .select("*")
       .eq("teacher_id", session.user.id);
     if (data) setStudentList(data);
+  };
+
+  // メッセージを送信
+  const sendMessage = async (studentId: string, text: string) => {
+    if (!session || !text.trim()) return;
+    const { error } = await supabase
+      .from("messages")
+      .insert({
+        teacher_id: session.user.id,
+        student_id: studentId,
+        message_text: text.trim(),
+      });
+    if (error) {
+      setStatus("❌ メッセージの送信に失敗しました: " + error.message);
+      return false;
+    }
+    setStatus("✅ メッセージを送信しました");
+    return true;
+  };
+
+  // 生徒のメッセージを取得
+  const fetchMessages = async () => {
+    if (!session) return;
+    const { data } = await supabase
+      .from("messages")
+      .select("*")
+      .eq("student_id", session.user.id)
+      .order("created_at", { ascending: false });
+    if (data) {
+      setMessages(data);
+      const unread = data.filter((m) => !m.is_read).length;
+      setUnreadMessageCount(unread);
+    }
+  };
+
+  // メッセージを既読にする
+  const markMessagesAsRead = async () => {
+    if (!session) return;
+    await supabase
+      .from("messages")
+      .update({ is_read: true })
+      .eq("student_id", session.user.id)
+      .eq("is_read", false);
+    fetchMessages();
   };
 
   const [todaysHomeworks, setTodaysHomeworks] = useState<string[]>([]);
@@ -294,8 +366,17 @@ export default function Home() {
 
   // --- 認証 ---
   const handleLogin = async () => {
+    // @が含まれているかで先生/生徒を判定
+    const isTeacher = email.includes('@') && !email.endsWith('@student.local');
+    let loginEmail = email;
+
+    if (!isTeacher) {
+      // 生徒ログイン: 生徒名から@student.localを付ける
+      loginEmail = `${email}@student.local`;
+    }
+
     const { error } = await supabase.auth.signInWithPassword({
-      email,
+      email: loginEmail,
       password,
     });
     if (error) setStatus("エラー: " + error.message);
@@ -338,8 +419,23 @@ export default function Home() {
       }
     }
 
+    // 生徒名の重複チェック
+    const { data: existingStudent } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("student_login_name", fullName)
+      .single();
+
+    if (existingStudent) {
+      setStatus("⚠️ この生徒名は既に使用されています。別の名前を選んでください");
+      return;
+    }
+
+    // 生徒用のメールアドレスを生成（内部用）
+    const studentEmail = `${fullName}@student.local`;
+
     const { data: authData, error } = await supabase.auth.signUp({
-      email,
+      email: studentEmail,
       password,
       options: { data: { full_name: fullName } },
     });
@@ -349,11 +445,14 @@ export default function Home() {
       return;
     }
 
-    // プロフィールにteacher_idを設定
+    // プロフィールにteacher_idとstudent_login_nameを設定
     if (authData.user) {
       const { error: profileError } = await supabase
         .from("profiles")
-        .update({ teacher_id: teacher.id })
+        .update({
+          teacher_id: teacher.id,
+          student_login_name: fullName
+        })
         .eq("id", authData.user.id);
 
       if (profileError) {
@@ -362,7 +461,7 @@ export default function Home() {
       }
     }
 
-    setStatus("登録完了！ログインしてください");
+    setStatus(`登録完了！ログイン名「${fullName}」でログインしてください`);
     setInviteCode("");
   };
   const handleLogout = async () => {
@@ -898,6 +997,42 @@ export default function Home() {
   const openTeacherManagement = async () => {
     setShowTeacherManagement(true);
     await fetchAllTeachers();
+  };
+
+  const deleteTeacher = async (teacherId: string, teacherName: string) => {
+    if (!confirm(`本当に「${teacherName}」先生を削除しますか？\n\nこの操作は取り消せません。先生に紐づく生徒データも削除されます。`)) {
+      return;
+    }
+
+    try {
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      if (!currentSession) {
+        setStatus("❌ セッションが見つかりません");
+        return;
+      }
+
+      const response = await fetch("/api/delete-teacher", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${currentSession.access_token}`
+        },
+        body: JSON.stringify({
+          teacher_id: teacherId
+        })
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        setStatus(`✅ 先生「${teacherName}」を削除しました`);
+        fetchAllTeachers();
+      } else {
+        setStatus(`❌ 削除失敗: ${result.error}`);
+      }
+    } catch (error: any) {
+      setStatus(`❌ エラー: ${error.message}`);
+    }
   };
 
   // 問題割り当て関連
@@ -1467,6 +1602,17 @@ export default function Home() {
           </div>
           {session && (
             <div className="flex gap-2 md:gap-4 items-center">
+              {isAdminMode && (
+                <button
+                  onClick={() => {
+                    fetchAllTeachers();
+                    setShowTeacherManagement(true);
+                  }}
+                  className="text-sm bg-yellow-500 text-gray-900 px-3 py-1 rounded hover:bg-yellow-400 transition font-bold"
+                >
+                  🔧 先生管理
+                </button>
+              )}
               <button
                 onClick={() => setMode("mypage")}
                 className="text-sm bg-white/20 text-white px-3 py-1 rounded hover:bg-white/30 transition"
@@ -1525,10 +1671,19 @@ export default function Home() {
           {!session ? (
             <div className="space-y-4 max-w-sm mx-auto mt-10">
               <h2 className="text-center font-bold text-2xl">ログイン</h2>
+              <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+                <p className="text-xs text-blue-800 font-bold mb-1">
+                  📌 ログイン方法
+                </p>
+                <ul className="text-xs text-blue-700 space-y-1">
+                  <li>👨‍🏫 <strong>先生</strong>: メールアドレスを入力</li>
+                  <li>👨‍🎓 <strong>生徒</strong>: 生徒名を入力（例: taro）</li>
+                </ul>
+              </div>
               <input
                 className="w-full border p-3 rounded"
-                type="email"
-                placeholder="メール"
+                type="text"
+                placeholder="メールアドレス または 生徒名"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
               />
@@ -1541,13 +1696,16 @@ export default function Home() {
               />
               <div className="border-t pt-4 mt-2 space-y-3">
                 <div>
-                  <p className="text-xs text-gray-500 mb-1">
-                    ※新規登録の方は以下を入力してください
+                  <p className="text-xs text-gray-500 mb-1 font-bold">
+                    📝 新規登録（生徒用）
+                  </p>
+                  <p className="text-xs text-gray-500 mb-2">
+                    ※先生の登録は通常のメールアドレスで行ってください
                   </p>
                   <input
                     className="w-full border p-3 rounded border-blue-200 bg-blue-50 mb-2"
                     type="text"
-                    placeholder="名前 (生徒名)"
+                    placeholder="生徒名（ログインに使用）例: taro"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
                   />
@@ -1577,9 +1735,9 @@ export default function Home() {
               </button>
               <button
                 onClick={handleSignUp}
-                className="w-full text-indigo-600 text-sm"
+                className="w-full text-indigo-600 text-sm font-bold"
               >
-                新規登録 (名前必須)
+                🎓 生徒として新規登録
               </button>
               <p className="text-red-500 text-center">{status}</p>
             </div>
@@ -1823,16 +1981,27 @@ export default function Home() {
 
               <div className="grid gap-3">
                 {studentList.map((student) => (
-                  <button
-                    key={student.id}
-                    onClick={() => openStudentDetail(student)}
-                    className="p-4 bg-gray-100 rounded-xl hover:bg-gray-200 text-left font-bold flex items-center gap-3"
-                  >
-                    👤{" "}
-                    {student.full_name
-                      ? student.full_name
-                      : student.email.substring(0, 5)}
-                  </button>
+                  <div key={student.id} className="flex gap-2">
+                    <button
+                      onClick={() => openStudentDetail(student)}
+                      className="flex-1 p-4 bg-gray-100 rounded-xl hover:bg-gray-200 text-left font-bold flex items-center gap-3"
+                    >
+                      👤{" "}
+                      {student.full_name
+                        ? student.full_name
+                        : student.email.substring(0, 5)}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMessageTargetStudent(student);
+                        setShowMessageModal(true);
+                      }}
+                      className="px-4 py-2 bg-blue-500 text-white rounded-xl hover:bg-blue-600 font-bold shadow-md"
+                      title="メッセージを送信"
+                    >
+                      ✉️
+                    </button>
+                  </div>
                 ))}
                 {studentList.length === 0 && (
                   <p className="text-gray-500 text-center py-8">
@@ -1858,6 +2027,26 @@ export default function Home() {
                   👤 {targetStudent?.full_name || targetStudent?.email}
                 </h3>
                 <p className="text-sm text-gray-600">のデータを操作中</p>
+              </div>
+
+              {/* メッセージ送信ボタン */}
+              <div className="bg-blue-50 p-4 rounded-xl border-2 border-blue-300">
+                <button
+                  onClick={() => {
+                    console.log("メッセージボタンがクリックされました");
+                    console.log("targetStudent:", targetStudent);
+                    if (targetStudent) {
+                      console.log("モーダルを開きます");
+                      setMessageTargetStudent(targetStudent);
+                      setShowMessageModal(true);
+                    } else {
+                      console.log("targetStudentが設定されていません");
+                    }
+                  }}
+                  className="w-full bg-blue-600 text-white p-4 rounded-xl font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center gap-2"
+                >
+                  ✉️ この生徒にメッセージを送信
+                </button>
               </div>
 
               <div className="space-y-8">
@@ -2489,6 +2678,45 @@ export default function Home() {
             </div>
           ) : mode === "menu" ? (
             <div className="space-y-6 mt-2">
+              {/* メッセージセクション（常に表示） */}
+              <div className={`p-4 rounded-xl border-2 ${
+                unreadMessageCount > 0
+                  ? 'bg-blue-50 border-blue-300 animate-in fade-in zoom-in duration-300'
+                  : 'bg-gray-50 border-gray-300'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className={`font-bold text-lg mb-1 ${
+                      unreadMessageCount > 0 ? 'text-blue-800' : 'text-gray-700'
+                    }`}>
+                      ✉️ 先生からのメッセージ
+                    </h3>
+                    <p className={`text-sm ${
+                      unreadMessageCount > 0 ? 'text-blue-600 font-bold' : 'text-gray-600'
+                    }`}>
+                      {unreadMessageCount > 0
+                        ? `未読メッセージが ${unreadMessageCount} 件あります`
+                        : `メッセージ: ${messages.length} 件`}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setMode("messages");
+                      if (unreadMessageCount > 0) {
+                        markMessagesAsRead();
+                      }
+                    }}
+                    className={`px-4 py-2 rounded-lg font-bold shadow-md ${
+                      unreadMessageCount > 0
+                        ? 'bg-blue-600 text-white hover:bg-blue-700'
+                        : 'bg-gray-400 text-white hover:bg-gray-500'
+                    }`}
+                  >
+                    {unreadMessageCount > 0 ? '確認する' : '見る'}
+                  </button>
+                </div>
+              </div>
+
               {todaysHomeworks.length > 0 && (
                 <div className="bg-orange-50 p-4 rounded-xl border-2 border-orange-200 animate-in fade-in zoom-in duration-300">
                   <h3 className="font-bold text-orange-800 text-lg mb-1">
@@ -2505,30 +2733,17 @@ export default function Home() {
                       </span>
                     ))}
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => {
-                        setStudyMode("homework");
-                        setStudyIsWeak(true);
-                        setStudySelectedFolders(todaysHomeworks);
-                        setShowStudySettings(true);
-                      }}
-                      className="bg-orange-600 text-white p-4 rounded-xl font-bold shadow-lg hover:bg-orange-700"
-                    >
-                      🔥 宿題特訓
-                    </button>
-                    <button
-                      onClick={() => {
-                        setStudyMode("homework");
-                        setStudyIsWeak(false);
-                        setStudySelectedFolders(todaysHomeworks);
-                        setShowStudySettings(true);
-                      }}
-                      className="bg-orange-400 text-white p-4 rounded-xl font-bold shadow hover:bg-orange-500"
-                    >
-                      📝 宿題全問
-                    </button>
-                  </div>
+                  <button
+                    onClick={() => {
+                      setStudyMode("homework");
+                      setStudyIsWeak(true);
+                      setStudySelectedFolders(todaysHomeworks);
+                      setShowStudySettings(true);
+                    }}
+                    className="w-full bg-orange-600 text-white p-4 rounded-xl font-bold shadow-lg hover:bg-orange-700"
+                  >
+                    🔥 宿題特訓
+                  </button>
                 </div>
               )}
 
@@ -2618,7 +2833,7 @@ export default function Home() {
               {/* 学習設定モーダル */}
               {showStudySettings && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                  <div className="bg-white rounded-xl p-6 max-w-md w-full space-y-4">
+                  <div className="bg-white rounded-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto space-y-4">
                     <h3 className="font-bold text-xl text-gray-800">
                       {studyMode === "homework" ? "🏠 宿題設定" : "📚 自主学習設定"}
                     </h3>
@@ -3209,192 +3424,51 @@ export default function Home() {
                   </div>
                 </div>
               )}
+            </div>
+          ) : mode === "messages" ? (
+            // --- メッセージ画面 ---
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold">✉️ メッセージ</h2>
+                <button
+                  onClick={() => setMode("menu")}
+                  className="bg-gray-400 text-white px-4 py-2 rounded-lg font-bold hover:bg-gray-500"
+                >
+                  戻る
+                </button>
+              </div>
 
-              {/* 先生管理モーダルは最下部に移動 */}
-              {false && showTeacherManagement && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
-                  <div className="bg-white rounded-xl p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto space-y-6">
-                    <div className="flex justify-between items-center sticky top-0 bg-white pb-4 border-b">
-                      <h3 className="font-bold text-2xl text-gray-800">
-                        🔧 先生管理
-                      </h3>
-                      <button
-                        onClick={() => setShowTeacherManagement(false)}
-                        className="text-gray-500 hover:text-gray-700 text-2xl"
-                      >
-                        ✕
-                      </button>
-                    </div>
-
-                    {/* 新規先生登録フォーム */}
-                    <div className="bg-orange-50 border-2 border-orange-200 rounded-xl p-4 space-y-3">
-                      <h4 className="font-bold text-lg text-orange-800">➕ 新規先生登録</h4>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-sm font-bold mb-1">メールアドレス</label>
-                          <input
-                            type="email"
-                            className="w-full border p-2 rounded"
-                            placeholder="teacher@example.com"
-                            value={newTeacherEmail}
-                            onChange={(e) => setNewTeacherEmail(e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-bold mb-1">名前</label>
-                          <input
-                            type="text"
-                            className="w-full border p-2 rounded"
-                            placeholder="田中太郎"
-                            value={newTeacherName}
-                            onChange={(e) => setNewTeacherName(e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-bold mb-1">先生モードパスワード</label>
-                          <input
-                            type="text"
-                            className="w-full border p-2 rounded"
-                            placeholder="初期パスワード"
-                            value={newTeacherPasswordForCreation}
-                            onChange={(e) => setNewTeacherPasswordForCreation(e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-bold mb-1">生徒上限数</label>
-                          <input
-                            type="number"
-                            className="w-full border p-2 rounded"
-                            value={newTeacherStudentLimit}
-                            onChange={(e) => setNewTeacherStudentLimit(Number(e.target.value))}
-                          />
-                        </div>
+              {messages.length === 0 ? (
+                <div className="text-center py-12 text-gray-500">
+                  <p className="text-lg mb-2">📭</p>
+                  <p>メッセージはありません</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`p-4 rounded-xl border-2 ${
+                        message.is_read
+                          ? "bg-white border-gray-200"
+                          : "bg-blue-50 border-blue-300"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-gray-500">
+                          {new Date(message.created_at).toLocaleString("ja-JP")}
+                        </span>
+                        {!message.is_read && (
+                          <span className="bg-blue-600 text-white text-xs px-2 py-1 rounded font-bold">
+                            NEW
+                          </span>
+                        )}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id="unlimited"
-                          checked={newTeacherUnlimited}
-                          onChange={(e) => setNewTeacherUnlimited(e.target.checked)}
-                          className="w-4 h-4"
-                        />
-                        <label htmlFor="unlimited" className="text-sm font-bold">
-                          ✨ 無制限ライセンスを付与
-                        </label>
-                      </div>
-                      <button
-                        onClick={createNewTeacher}
-                        className="w-full bg-orange-600 text-white py-3 rounded-lg font-bold hover:bg-orange-700"
-                      >
-                        ➕ 先生を登録
-                      </button>
+                      <p className="text-gray-800 whitespace-pre-wrap">
+                        {message.message_text}
+                      </p>
                     </div>
-
-                    {/* 既存の先生一覧 */}
-                    <div className="space-y-3">
-                      <h4 className="font-bold text-lg text-gray-800">👥 登録済みの先生</h4>
-                      {allTeachers.length === 0 && (
-                        <p className="text-gray-500 text-center py-8">先生が登録されていません</p>
-                      )}
-                      {allTeachers.map((teacher) => (
-                        <div
-                          key={teacher.id}
-                          className="bg-gray-50 border rounded-xl p-4 space-y-3"
-                        >
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <p className="text-xs text-gray-500">名前</p>
-                              <p className="font-bold">{teacher.full_name}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-gray-500">メールアドレス</p>
-                              <p className="font-bold text-sm">{teacher.email}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-gray-500">招待コード</p>
-                              <p className="font-bold text-indigo-600">{teacher.invite_code}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-gray-500">生徒上限</p>
-                              <p className="font-bold">
-                                {teacher.has_unlimited_license ? "✨ 無制限" : `${teacher.student_limit}人`}
-                              </p>
-                            </div>
-                          </div>
-
-                          {editingTeacher?.id === teacher.id ? (
-                            <div className="bg-white border-2 border-indigo-200 rounded-lg p-3 space-y-3">
-                              <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                  <label className="block text-xs font-bold mb-1">生徒上限数</label>
-                                  <input
-                                    type="number"
-                                    className="w-full border p-2 rounded"
-                                    defaultValue={teacher.student_limit}
-                                    id={`limit-${teacher.id}`}
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-xs font-bold mb-1">新しいパスワード</label>
-                                  <input
-                                    type="text"
-                                    className="w-full border p-2 rounded"
-                                    placeholder="変更する場合のみ"
-                                    id={`password-${teacher.id}`}
-                                  />
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="checkbox"
-                                  id={`unlimited-${teacher.id}`}
-                                  defaultChecked={teacher.has_unlimited_license}
-                                  className="w-4 h-4"
-                                />
-                                <label htmlFor={`unlimited-${teacher.id}`} className="text-sm font-bold">
-                                  無制限ライセンス
-                                </label>
-                              </div>
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => setEditingTeacher(null)}
-                                  className="flex-1 bg-gray-400 text-white py-2 rounded font-bold"
-                                >
-                                  キャンセル
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    const updates: any = {};
-                                    const limitInput = document.getElementById(`limit-${teacher.id}`) as HTMLInputElement;
-                                    const passwordInput = document.getElementById(`password-${teacher.id}`) as HTMLInputElement;
-                                    const unlimitedCheckbox = document.getElementById(`unlimited-${teacher.id}`) as HTMLInputElement;
-
-                                    if (limitInput) updates.student_limit = Number(limitInput.value);
-                                    if (passwordInput?.value) updates.teacher_password = passwordInput.value;
-                                    if (unlimitedCheckbox) updates.has_unlimited_license = unlimitedCheckbox.checked;
-
-                                    updateTeacher(teacher.id, updates);
-                                  }}
-                                  className="flex-1 bg-indigo-600 text-white py-2 rounded font-bold"
-                                >
-                                  更新
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => setEditingTeacher(teacher)}
-                              className="w-full bg-indigo-600 text-white py-2 rounded font-bold hover:bg-indigo-700"
-                            >
-                              編集
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    <p className="text-center font-bold text-green-600">{status}</p>
-                  </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -3885,8 +3959,7 @@ export default function Home() {
                                     <th className="border border-indigo-500 px-3 py-2 text-left">問題</th>
                                     <th className="border border-indigo-500 px-3 py-2 text-center">回答数</th>
                                     <th className="border border-indigo-500 px-3 py-2 text-center">正解率</th>
-                                    <th className="border border-indigo-500 px-3 py-2 text-center">最終結果</th>
-                                    <th className="border border-indigo-500 px-3 py-2 text-center">最終回答日</th>
+                                    <th className="border border-indigo-500 px-3 py-2 text-center">過去5回の履歴</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -3897,8 +3970,7 @@ export default function Home() {
                                     const correctRate = totalAttempts > 0
                                       ? Math.round((correctCount / totalAttempts) * 100)
                                       : 0;
-                                    const lastResult = history.length > 0 ? history[history.length - 1].result : "-";
-                                    const lastDate = history.length > 0 ? history[history.length - 1].date : "-";
+                                    const last5History = history.slice(-5).reverse();
 
                                     return (
                                       <tr
@@ -3926,17 +3998,28 @@ export default function Home() {
                                             {totalAttempts > 0 ? `${correctRate}%` : '-'}
                                           </span>
                                         </td>
-                                        <td className="border border-gray-300 px-3 py-2 text-center">
-                                          <span className={`px-2 py-1 rounded font-bold text-xs ${
-                                            lastResult === "○" ? 'bg-green-100 text-green-700' :
-                                            lastResult === "×" ? 'bg-red-100 text-red-700' :
-                                            'text-gray-400'
-                                          }`}>
-                                            {lastResult}
-                                          </span>
-                                        </td>
-                                        <td className="border border-gray-300 px-3 py-2 text-center text-xs text-gray-600">
-                                          {lastDate !== "-" ? lastDate : "未学習"}
+                                        <td className="border border-gray-300 px-2 py-2">
+                                          <div className="flex flex-col gap-1 text-xs">
+                                            {last5History.length > 0 ? (
+                                              last5History.map((h, i) => (
+                                                <div key={i} className="flex items-center justify-between gap-2">
+                                                  <span className={`px-2 py-0.5 rounded font-bold ${
+                                                    h.result === "○" ? 'bg-green-100 text-green-700' :
+                                                    h.result === "×" ? 'bg-red-100 text-red-700' :
+                                                    h.result === "△" ? 'bg-yellow-100 text-yellow-700' :
+                                                    'text-gray-400'
+                                                  }`}>
+                                                    {h.result}
+                                                  </span>
+                                                  <span className="text-gray-600 text-[10px]">
+                                                    {h.date}
+                                                  </span>
+                                                </div>
+                                              ))
+                                            ) : (
+                                              <span className="text-gray-400 text-center">未学習</span>
+                                            )}
+                                          </div>
                                         </td>
                                       </tr>
                                     );
@@ -4213,18 +4296,91 @@ export default function Home() {
                       </div>
                     </div>
                   ) : (
-                    <button
-                      onClick={() => setEditingTeacher(teacher)}
-                      className="w-full bg-indigo-600 text-white py-2 rounded font-bold hover:bg-indigo-700"
-                    >
-                      編集
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setEditingTeacher(teacher)}
+                        className="flex-1 bg-indigo-600 text-white py-2 rounded font-bold hover:bg-indigo-700"
+                      >
+                        編集
+                      </button>
+                      <button
+                        onClick={() => deleteTeacher(teacher.id, teacher.full_name)}
+                        className="flex-1 bg-red-600 text-white py-2 rounded font-bold hover:bg-red-700"
+                      >
+                        🗑️ 削除
+                      </button>
+                    </div>
                   )}
                 </div>
               ))}
             </div>
 
             <p className="text-center font-bold text-green-600">{status}</p>
+          </div>
+        </div>
+      )}
+
+      {/* メッセージ送信モーダル - 最上位レベル */}
+      {showMessageModal && messageTargetStudent && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[9999]">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full space-y-4">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="text-xl font-bold text-gray-800">
+                ✉️ メッセージ送信
+              </h3>
+              <button
+                onClick={() => {
+                  console.log("モーダルを閉じます");
+                  setShowMessageModal(false);
+                  setMessageTargetStudent(null);
+                  setMessageText("");
+                }}
+                className="text-gray-500 hover:text-gray-700 text-2xl"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-2">
+                送信先: <span className="font-bold">{messageTargetStudent.full_name || messageTargetStudent.email}</span>
+              </p>
+              <textarea
+                value={messageText}
+                onChange={(e) => setMessageText(e.target.value)}
+                placeholder="メッセージを入力してください..."
+                className="w-full border-2 border-gray-300 rounded-lg p-3 text-sm focus:border-blue-500 focus:outline-none min-h-[150px]"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowMessageModal(false);
+                  setMessageTargetStudent(null);
+                  setMessageText("");
+                }}
+                className="flex-1 bg-gray-400 text-white py-3 rounded-lg font-bold hover:bg-gray-500"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={async () => {
+                  if (messageTargetStudent) {
+                    const success = await sendMessage(messageTargetStudent.id, messageText);
+                    if (success) {
+                      setShowMessageModal(false);
+                      setMessageTargetStudent(null);
+                      setMessageText("");
+                    }
+                  }
+                }}
+                disabled={!messageText.trim()}
+                className="flex-1 bg-blue-600 disabled:bg-gray-300 text-white py-3 rounded-lg font-bold hover:bg-blue-700 disabled:hover:bg-gray-300"
+              >
+                送信
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -49,62 +49,25 @@ export async function POST(req: NextRequest) {
 
     // リクエストボディを取得
     const body = await req.json();
-    const { email, full_name, teacher_password, student_limit = 3, has_unlimited_license = false } = body;
+    const { teacher_id } = body;
 
-    if (!email || !full_name || !teacher_password) {
-      return NextResponse.json({ error: '必須項目が不足しています' }, { status: 400 });
+    if (!teacher_id) {
+      return NextResponse.json({ error: '先生IDが必要です' }, { status: 400 });
     }
 
-    // Admin用クライアントでユーザーを作成
+    // Admin用クライアントで削除
     const supabaseAdmin = getAdminClient();
 
-    // 1. Authユーザーを作成（管理者が入力したパスワードを使用）
-    const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
-      email,
-      password: teacher_password,
-      email_confirm: true,
-      user_metadata: {
-        full_name
-      }
-    });
+    // 1. Authユーザーを削除（これによりカスケードでprofilesも削除される）
+    const { error: deleteError } = await supabaseAdmin.auth.admin.deleteUser(teacher_id);
 
-    if (createError || !authData.user) {
-      return NextResponse.json({ error: 'ユーザー作成に失敗しました: ' + createError?.message }, { status: 500 });
-    }
-
-    // 2. 招待コードを生成
-    const invite_code = Math.random().toString(36).substring(2, 10).toUpperCase();
-
-    // 3. profilesテーブルに登録
-    const { error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .insert({
-        id: authData.user.id,
-        email,
-        full_name,
-        is_teacher: true,
-        teacher_password,
-        invite_code,
-        student_limit,
-        has_unlimited_license
-      });
-
-    if (profileError) {
-      // プロフィール作成失敗時はAuthユーザーも削除
-      await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
-      return NextResponse.json({ error: 'プロフィール作成に失敗しました: ' + profileError.message }, { status: 500 });
+    if (deleteError) {
+      return NextResponse.json({ error: 'ユーザー削除に失敗しました: ' + deleteError.message }, { status: 500 });
     }
 
     return NextResponse.json({
       success: true,
-      teacher: {
-        id: authData.user.id,
-        email,
-        full_name,
-        invite_code,
-        student_limit,
-        has_unlimited_license
-      }
+      message: '先生を削除しました'
     });
 
   } catch (error: any) {
