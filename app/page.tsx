@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 // --- 型定義 ---
-type HistoryItem = { date: string; result: "○" | "×" };
+type HistoryItem = { date: string; result: "○" | "×" | "△" };
 type Problem = {
   id: number;
   question_text: string;
@@ -83,6 +83,15 @@ export default function Home() {
   const [exportEndDate, setExportEndDate] = useState(
     new Date().toISOString().split("T")[0]
   );
+  const [exportSelectedFolder, setExportSelectedFolder] = useState<string | null>(null); // 出力画面で選択されたフォルダ
+  const [exportFolderProblems, setExportFolderProblems] = useState<Problem[]>([]); // 選択されたフォルダの問題リスト
+  const [showProgressModal, setShowProgressModal] = useState(false); // 宿題選択画面から進捗確認モーダルを表示
+  const [progressFolder, setProgressFolder] = useState<string | null>(null); // 進捗確認中のフォルダ
+  const [progressProblems, setProgressProblems] = useState<Problem[]>([]); // 進捗確認中のフォルダの問題リスト
+  const [showMasteredModal, setShowMasteredModal] = useState(false); // 殿堂入り問題モーダル
+  const [masteredProblems, setMasteredProblems] = useState<Problem[]>([]); // 殿堂入り問題リスト
+  const [selectedMasteredIds, setSelectedMasteredIds] = useState<number[]>([]); // 再出題選択中の問題ID
+  const [masteredFilterFolder, setMasteredFilterFolder] = useState<string>("全て"); // 殿堂入り問題のフォルダフィルター
 
   // --- 編集用 ---
   const [editProblems, setEditProblems] = useState<Problem[]>([]); // 編集用問題リスト
@@ -114,6 +123,10 @@ export default function Home() {
   const [studyMode, setStudyMode] = useState<"homework" | "self">("self");
   const [studyIsWeak, setStudyIsWeak] = useState(false);
   const [studySelectedFolders, setStudySelectedFolders] = useState<string[]>([]);
+  const [useRangeSelection, setUseRangeSelection] = useState(false); // 範囲選択を使用するか
+  const [rangeStart, setRangeStart] = useState<number>(1); // 開始問題番号
+  const [rangeEnd, setRangeEnd] = useState<number>(10); // 終了問題番号
+  const [isSequentialOrder, setIsSequentialOrder] = useState(false); // 順番通り出題するか（falseならランダム）
 
   // --- 先生管理用 ---
   const [showTeacherManagement, setShowTeacherManagement] = useState(false);
@@ -1098,6 +1111,7 @@ export default function Home() {
 
     let sorted = data;
     if (isWeakMode) {
+      // 弱点モード: 間違えた回数が多い順にソート
       const countX = (h: HistoryItem[]) =>
         h.filter((x) => x.result === "×").length;
       sorted = data.sort(
@@ -1105,12 +1119,36 @@ export default function Home() {
           countX(b.history || []) - countX(a.history || []) ||
           Math.random() - 0.5
       );
+    } else if (isSequentialOrder) {
+      // 順番通りモード: ID順（データベースの順序）でソート
+      sorted = data.sort((a, b) => a.id - b.id);
     } else {
+      // ランダムモード: ランダムにシャッフル
       sorted = data.sort(() => Math.random() - 0.5);
     }
 
-    // 問題数を制限（設定された数まで）
-    const limitedProblems = sorted.slice(0, studyProblemCount);
+    // 範囲選択または問題数選択で制限
+    let limitedProblems;
+    if (useRangeSelection) {
+      // 範囲選択の場合: 開始〜終了の範囲を取得
+      // 順番通りモードの場合はソート済みの配列から範囲を取得
+      const start = Math.max(0, rangeStart - 1); // 1-indexed to 0-indexed
+      const end = Math.min(sorted.length, rangeEnd); // 範囲外を防ぐ
+      limitedProblems = sorted.slice(start, end);
+
+      // 範囲が無効な場合のエラーチェック
+      if (rangeStart > rangeEnd) {
+        setStatus("⚠️ 開始問題番号は終了問題番号以下にしてください");
+        return;
+      }
+      if (rangeStart > sorted.length) {
+        setStatus(`⚠️ 開始問題番号が範囲外です（最大: ${sorted.length}問）`);
+        return;
+      }
+    } else {
+      // 問題数選択の場合: 従来通り
+      limitedProblems = sorted.slice(0, studyProblemCount);
+    }
 
     // 各問題に「今回未正解」フラグを初期化
     const problemsWithFlags = limitedProblems.map((p) => ({
@@ -1130,6 +1168,44 @@ export default function Home() {
     setShowStudySettings(true);
   };
 
+  // 殿堂入り判定関数
+  const checkIsMastered = (history: HistoryItem[]): boolean => {
+    if (!history || history.length === 0) return false;
+
+    // 履歴を日付ごとにグループ化
+    const dateMap = new Map<string, HistoryItem[]>();
+    history.forEach(h => {
+      if (h.result === "△") return; // △は除外
+      const dateOnly = h.date.split(' ')[0]; // "2024/1/26 10:30:00" -> "2024/1/26"
+      if (!dateMap.has(dateOnly)) {
+        dateMap.set(dateOnly, []);
+      }
+      dateMap.get(dateOnly)!.push(h);
+    });
+
+    // 日付順にソート
+    const sortedDates = Array.from(dateMap.keys()).sort();
+
+    // 直近3日間をチェック
+    if (sortedDates.length >= 3) {
+      const last3Dates = sortedDates.slice(-3);
+      const allFirstAttemptCorrect = last3Dates.every(date => {
+        const dayHistory = dateMap.get(date)!;
+        return dayHistory[0].result === "○"; // その日の1問目が○
+      });
+
+      if (allFirstAttemptCorrect) return true;
+    }
+
+    // △マーク後に1回で○なら再度殿堂入り
+    const lastTwo = history.slice(-2);
+    if (lastTwo.length === 2 && lastTwo[0].result === "△" && lastTwo[1].result === "○") {
+      return true;
+    }
+
+    return false;
+  };
+
   const handleResult = async (isCorrect: boolean) => {
     const current = problems[currentIndex];
     const now = new Date();
@@ -1140,9 +1216,10 @@ export default function Home() {
         result: isCorrect ? "○" : "×",
       } as HistoryItem,
     ];
-    const recent3 = newHistory.slice(-3);
-    const isMastered =
-      recent3.length >= 3 && recent3.every((h) => h.result === "○");
+
+    // 殿堂入り判定（関数化したものを使用）
+    const isMastered = checkIsMastered(newHistory);
+
     let nextReview = new Date(now);
     if (isCorrect) nextReview.setDate(now.getDate() + 1);
 
@@ -1222,6 +1299,150 @@ export default function Home() {
     homeworkFolders.includes(folder)
       ? setHomeworkFolders(homeworkFolders.filter((f) => f !== folder))
       : setHomeworkFolders([...homeworkFolders, folder]);
+  };
+
+  // フォルダを選択して問題と正誤履歴を表示
+  const selectFolderForExport = async (folder: string) => {
+    setExportSelectedFolder(folder);
+    setStatus("読み込み中...");
+
+    const targetId = session.user.id;
+
+    // student_problems 経由で問題を取得
+    const { data: studentProblems, error: spError } = await supabase
+      .from("student_problems")
+      .select("problem_id, problems(*)")
+      .eq("student_id", targetId);
+
+    if (spError) {
+      setStatus("問題の取得に失敗しました: " + spError.message);
+      return;
+    }
+
+    // problems データを抽出してフォルダでフィルタ
+    const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+    const folderProblems = allProblems.filter((p: Problem) => p.subject === folder);
+
+    setExportFolderProblems(folderProblems);
+    setStatus("");
+  };
+
+  // 宿題選択画面から進捗を確認
+  const showFolderProgress = async (folder: string) => {
+    setProgressFolder(folder);
+    setStatus("読み込み中...");
+
+    const targetId = session.user.id;
+
+    // student_problems 経由で問題を取得
+    const { data: studentProblems, error: spError } = await supabase
+      .from("student_problems")
+      .select("problem_id, problems(*)")
+      .eq("student_id", targetId);
+
+    if (spError) {
+      setStatus("問題の取得に失敗しました: " + spError.message);
+      return;
+    }
+
+    // problems データを抽出してフォルダでフィルタ
+    const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+    const folderProblems = allProblems.filter((p: Problem) => p.subject === folder);
+
+    setProgressProblems(folderProblems);
+    setShowProgressModal(true);
+    setStatus("");
+  };
+
+  // 殿堂入り問題を表示
+  const showMasteredProblems = async () => {
+    // 選択中のフォルダがない場合はエラー
+    if (selectedFolders.length === 0) {
+      setStatus("⚠️ フォルダを選択してください");
+      return;
+    }
+
+    setStatus("読み込み中...");
+
+    const targetId = session.user.id;
+
+    // student_problems 経由で問題を取得
+    const { data: studentProblems, error: spError } = await supabase
+      .from("student_problems")
+      .select("problem_id, problems(*)")
+      .eq("student_id", targetId);
+
+    if (spError) {
+      setStatus("問題の取得に失敗しました: " + spError.message);
+      return;
+    }
+
+    // problems データを抽出
+    const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+
+    console.log("選択中のフォルダ:", selectedFolders);
+    console.log("全問題数:", allProblems.length);
+
+    // 選択中のフォルダの殿堂入り問題のみをフィルタ（クライアント側で再判定）
+    const mastered = allProblems.filter((p: Problem) => {
+      // 選択中のフォルダに含まれているか
+      const isInSelectedFolder = selectedFolders.includes(p.subject);
+
+      if (!isInSelectedFolder) return false;
+
+      // 履歴から殿堂入りかどうかを判定
+      const isMastered = checkIsMastered(p.history || []);
+
+      return isMastered;
+    });
+
+    console.log("殿堂入り問題数:", mastered.length);
+
+    setMasteredProblems(mastered);
+    setSelectedMasteredIds([]);
+    setMasteredFilterFolder("全て"); // フィルターをリセット
+    setShowMasteredModal(true);
+    setStatus("");
+  };
+
+  // 選択した殿堂入り問題に△マークを追加
+  const addTriangleToMastered = async () => {
+    if (selectedMasteredIds.length === 0) {
+      setStatus("⚠️ 再出題する問題を選択してください");
+      return;
+    }
+
+    setStatus("処理中...");
+
+    for (const problemId of selectedMasteredIds) {
+      const problem = masteredProblems.find(p => p.id === problemId);
+      if (!problem) continue;
+
+      const newHistory = [
+        ...(problem.history || []),
+        {
+          date: new Date().toLocaleString("ja-JP"),
+          result: "△",
+        } as HistoryItem,
+      ];
+
+      // △マークを追加し、is_masteredをfalseに、next_review_atを現在時刻に
+      await supabase
+        .from("problems")
+        .update({
+          history: newHistory,
+          is_mastered: false,
+          next_review_at: new Date().toISOString(),
+        })
+        .eq("id", problemId);
+    }
+
+    setStatus(`✅ ${selectedMasteredIds.length}問を再出題リストに追加しました`);
+    setShowMasteredModal(false);
+    setSelectedMasteredIds([]);
+
+    // フォルダ一覧を更新
+    fetchFolders(session.user.id);
   };
 
   return (
@@ -2280,7 +2501,7 @@ export default function Home() {
                         key={f}
                         className="bg-white px-2 py-1 rounded text-sm border text-orange-600 font-bold"
                       >
-                        {f}
+                        {f} ({folderCounts[f] || 0})
                       </span>
                     ))}
                   </div>
@@ -2384,6 +2605,16 @@ export default function Home() {
                 </button>
               </div>
 
+              {/* 殿堂入り問題の再出題ボタン */}
+              {selectedFolders.length > 0 && (
+                <button
+                  onClick={() => showMasteredProblems()}
+                  className="w-full bg-gradient-to-r from-yellow-400 to-yellow-500 text-gray-800 p-4 rounded-xl font-bold hover:from-yellow-500 hover:to-yellow-600 shadow-lg transition-all border-2 border-yellow-600"
+                >
+                  👑 殿堂入り問題の再出題
+                </button>
+              )}
+
               {/* 学習設定モーダル */}
               {showStudySettings && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -2392,59 +2623,215 @@ export default function Home() {
                       {studyMode === "homework" ? "🏠 宿題設定" : "📚 自主学習設定"}
                     </h3>
 
-                    {/* フォルダ選択（宿題モードでは表示） */}
-                    {studyMode === "homework" && (
+                    {/* フォルダ選択（宿題モードではtodaysHomeworksから選択、自主学習ではselectedFoldersから選択） */}
+                    {studyMode === "homework" ? (
                       <div>
                         <label className="block text-sm font-bold text-gray-700 mb-2">
-                          📁 宿題のフォルダ
+                          �� 宿題のフォルダを選択
+                        </label>
+                        <p className="text-xs text-gray-500 mb-2">
+                          学習したいフォルダをタップして選択してください
+                        </p>
+                        <div className="space-y-2 mb-3">
+                          {todaysHomeworks.map((f) => (
+                            <div key={f} className="flex gap-2 items-center">
+                              <button
+                                onClick={() => {
+                                  setStudySelectedFolders((prev) =>
+                                    prev.includes(f)
+                                      ? prev.filter((folder) => folder !== f)
+                                      : [...prev, f]
+                                  );
+                                }}
+                                className={`flex-1 px-3 py-2 rounded-lg text-sm font-bold border-2 transition-all ${
+                                  studySelectedFolders.includes(f)
+                                    ? "bg-orange-500 text-white border-orange-600 shadow-md"
+                                    : "bg-white text-gray-700 border-gray-300 hover:border-orange-300"
+                                }`}
+                              >
+                                {studySelectedFolders.includes(f) ? "✓ " : ""}
+                                {f} ({folderCounts[f] || 0})
+                              </button>
+                              <button
+                                onClick={() => showFolderProgress(f)}
+                                className="px-3 py-2 rounded-lg text-xs font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-all border border-blue-300"
+                                title="このフォルダの進捗を確認"
+                              >
+                                📊
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        {studySelectedFolders.length === 0 && (
+                          <p className="text-xs text-red-500 font-bold">
+                            ⚠️ 少なくとも1つのフォルダを選択してください
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">
+                          📁 選択中のフォルダ
                         </label>
                         <div className="flex flex-wrap gap-2 mb-3">
-                          {studySelectedFolders.map((f) => (
-                            <button
+                          {selectedFolders.map((f) => (
+                            <span
                               key={f}
-                              onClick={() => {
-                                setStudySelectedFolders((prev) =>
-                                  prev.includes(f)
-                                    ? prev.filter((folder) => folder !== f)
-                                    : [...prev, f]
-                                );
-                              }}
-                              className={`px-3 py-1 rounded-full text-sm font-bold border ${
-                                studySelectedFolders.includes(f)
-                                  ? "bg-orange-500 text-white"
-                                  : "bg-gray-100"
+                              className="px-3 py-1 rounded-full text-sm font-bold bg-indigo-500 text-white"
+                            >
+                              ✓ {f} ({folderCounts[f] || 0})
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 殿堂入り問題の再出題ボタン */}
+                    {selectedFolders.length > 0 && (
+                      <div>
+                        <button
+                          onClick={() => showMasteredProblems()}
+                          className="w-full bg-gradient-to-r from-yellow-400 to-yellow-500 text-gray-800 p-3 rounded-lg font-bold hover:from-yellow-500 hover:to-yellow-600 shadow-md transition-all border-2 border-yellow-600"
+                        >
+                          👑 殿堂入り問題の再出題
+                        </button>
+                        <p className="text-xs text-gray-500 mt-1 text-center">
+                          選択中のフォルダの殿堂入り問題を確認・再出題できます
+                        </p>
+                      </div>
+                    )}
+
+                    {/* 問題範囲選択の切り替え */}
+                    <div>
+                      <label className="block text-sm font-bold text-gray-700 mb-2">
+                        📋 学習方法を選択
+                      </label>
+                      <div className="flex gap-2 mb-3">
+                        <button
+                          onClick={() => setUseRangeSelection(false)}
+                          className={`flex-1 py-2 px-4 rounded-lg font-bold transition-all ${
+                            !useRangeSelection
+                              ? "bg-indigo-600 text-white shadow-md"
+                              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                          }`}
+                        >
+                          問題数で選択
+                        </button>
+                        <button
+                          onClick={() => setUseRangeSelection(true)}
+                          className={`flex-1 py-2 px-4 rounded-lg font-bold transition-all ${
+                            useRangeSelection
+                              ? "bg-indigo-600 text-white shadow-md"
+                              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                          }`}
+                        >
+                          範囲で選択
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 問題数選択（範囲選択がOFFの場合） */}
+                    {!useRangeSelection && (
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">
+                          🔢 問題数を選択
+                        </label>
+                        <p className="text-xs text-gray-500 mb-2">
+                          選んだ問題数の中で、全問正解するまで繰り返します
+                        </p>
+                        <div className="grid grid-cols-4 gap-2">
+                          {[5, 10, 15, 20, 30, 50, 100, 999].map((count) => (
+                            <button
+                              key={count}
+                              onClick={() => setStudyProblemCount(count)}
+                              className={`p-2 rounded font-bold text-sm ${
+                                studyProblemCount === count
+                                  ? "bg-indigo-600 text-white"
+                                  : "bg-gray-100 text-gray-700"
                               }`}
                             >
-                              {studySelectedFolders.includes(f) ? "✓ " : ""}
-                              {f}
+                              {count === 999 ? "全部" : `${count}問`}
                             </button>
                           ))}
                         </div>
                       </div>
                     )}
 
-                    {/* 問題数選択 */}
+                    {/* 範囲選択（範囲選択がONの場合） */}
+                    {useRangeSelection && (
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">
+                          📍 問題番号の範囲を指定
+                        </label>
+                        <p className="text-xs text-gray-500 mb-3">
+                          フォルダ内の通し番号で、何問目から何問目まで学習するかを選択してください
+                        </p>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">
+                              開始問題番号
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={rangeStart}
+                              onChange={(e) => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))}
+                              className="w-full border-2 border-gray-300 rounded-lg p-2 text-center font-bold focus:border-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">
+                              終了問題番号
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={rangeEnd}
+                              onChange={(e) => setRangeEnd(Math.max(1, parseInt(e.target.value) || 1))}
+                              className="w-full border-2 border-gray-300 rounded-lg p-2 text-center font-bold focus:border-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-2 text-xs text-gray-600 bg-blue-50 p-2 rounded">
+                          💡 {rangeStart}問目〜{rangeEnd}問目を学習します
+                          （合計 {Math.max(0, rangeEnd - rangeStart + 1)}問）
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 出題順序選択 */}
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-2">
-                        🔢 問題数を選択
+                        🔀 出題順序を選択
                       </label>
-                      <p className="text-xs text-gray-500 mb-2">
-                        選んだ問題数の中で、全問正解するまで繰り返します
-                      </p>
-                      <div className="grid grid-cols-4 gap-2">
-                        {[5, 10, 15, 20, 30, 50, 100, 999].map((count) => (
-                          <button
-                            key={count}
-                            onClick={() => setStudyProblemCount(count)}
-                            className={`p-2 rounded font-bold text-sm ${
-                              studyProblemCount === count
-                                ? "bg-indigo-600 text-white"
-                                : "bg-gray-100 text-gray-700"
-                            }`}
-                          >
-                            {count === 999 ? "全部" : `${count}問`}
-                          </button>
-                        ))}
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          onClick={() => setIsSequentialOrder(false)}
+                          className={`py-3 px-4 rounded-lg font-bold transition-all border-2 ${
+                            !isSequentialOrder
+                              ? "bg-purple-600 text-white border-purple-700 shadow-md"
+                              : "bg-white text-gray-700 border-gray-300 hover:border-purple-300"
+                          }`}
+                        >
+                          <div className="text-lg mb-1">🎲</div>
+                          <div className="text-sm">ランダム</div>
+                        </button>
+                        <button
+                          onClick={() => setIsSequentialOrder(true)}
+                          className={`py-3 px-4 rounded-lg font-bold transition-all border-2 ${
+                            isSequentialOrder
+                              ? "bg-purple-600 text-white border-purple-700 shadow-md"
+                              : "bg-white text-gray-700 border-gray-300 hover:border-purple-300"
+                          }`}
+                        >
+                          <div className="text-lg mb-1">📊</div>
+                          <div className="text-sm">順番通り</div>
+                        </button>
+                      </div>
+                      <div className="mt-2 text-xs text-gray-500">
+                        {isSequentialOrder
+                          ? "📊 問題を番号順に出題します"
+                          : "🎲 問題をランダムな順序で出題します"}
                       </div>
                     </div>
 
@@ -2458,12 +2845,29 @@ export default function Home() {
                       </button>
                       <button
                         onClick={() => {
-                          setShowStudySettings(false);
+                          // 範囲選択のバリデーション
+                          if (useRangeSelection) {
+                            if (rangeStart > rangeEnd) {
+                              setStatus("⚠️ 開始問題番号は終了問題番号以下にしてください");
+                              return;
+                            }
+                            if (rangeStart < 1 || rangeEnd < 1) {
+                              setStatus("⚠️ 問題番号は1以上にしてください");
+                              return;
+                            }
+                          }
+
                           if (studyMode === "homework") {
+                            if (studySelectedFolders.length === 0) {
+                              setStatus("⚠️ 少なくとも1つのフォルダを選択してください");
+                              return;
+                            }
+                            setShowStudySettings(false);
                             selectedFolders.length = 0;
                             selectedFolders.push(...studySelectedFolders);
                             startStudy(studyIsWeak, true);
                           } else {
+                            setShowStudySettings(false);
                             startStudy(studyIsWeak, false);
                           }
                         }}
@@ -2472,6 +2876,336 @@ export default function Home() {
                         学習開始！
                       </button>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 進捗確認モーダル */}
+              {showProgressModal && progressFolder && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[60] overflow-y-auto">
+                  <div className="bg-white rounded-xl p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto space-y-4">
+                    <div className="flex items-center justify-between mb-4 sticky top-0 bg-white pb-3 border-b">
+                      <h3 className="text-xl font-bold text-gray-800">
+                        📊 {progressFolder} の進捗
+                      </h3>
+                      <button
+                        onClick={() => {
+                          setShowProgressModal(false);
+                          setProgressFolder(null);
+                          setProgressProblems([]);
+                        }}
+                        className="text-gray-600 hover:text-gray-800 font-bold text-xl"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    {progressProblems.length === 0 ? (
+                      <p className="text-gray-500 text-center py-8">問題がありません</p>
+                    ) : (
+                      <div className="space-y-4">
+                        {/* 進捗サマリー表 */}
+                        <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl p-4 border-2 border-indigo-200">
+                          <h4 className="font-bold text-lg text-gray-800 mb-3 flex items-center gap-2">
+                            📊 学習進捗一覧
+                            <span className="text-sm font-normal text-gray-600">
+                              （全{progressProblems.length}問）
+                            </span>
+                          </h4>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm border-collapse">
+                              <thead>
+                                <tr className="bg-indigo-600 text-white">
+                                  <th className="border border-indigo-500 px-3 py-2 text-left">No.</th>
+                                  <th className="border border-indigo-500 px-3 py-2 text-left">問題</th>
+                                  <th className="border border-indigo-500 px-3 py-2 text-center">回答数</th>
+                                  <th className="border border-indigo-500 px-3 py-2 text-center">正解率</th>
+                                  <th className="border border-indigo-500 px-3 py-2 text-center">最終結果</th>
+                                  <th className="border border-indigo-500 px-3 py-2 text-center">最終回答日</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {progressProblems.map((problem, index) => {
+                                  const history = problem.history || [];
+                                  const totalAttempts = history.length;
+                                  const correctCount = history.filter(h => h.result === "○").length;
+                                  const correctRate = totalAttempts > 0
+                                    ? Math.round((correctCount / totalAttempts) * 100)
+                                    : 0;
+                                  const lastResult = history.length > 0 ? history[history.length - 1].result : "-";
+                                  const lastDate = history.length > 0 ? history[history.length - 1].date : "-";
+
+                                  return (
+                                    <tr
+                                      key={problem.id}
+                                      className={`${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-indigo-50 transition-colors`}
+                                    >
+                                      <td className="border border-gray-300 px-3 py-2 font-bold text-gray-700">
+                                        {index + 1}
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-gray-800">
+                                        {problem.question_text.length > 30
+                                          ? problem.question_text.substring(0, 30) + "..."
+                                          : problem.question_text}
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-center text-gray-700">
+                                        {totalAttempts}回
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-center">
+                                        <span className={`font-bold ${
+                                          correctRate >= 80 ? 'text-green-600' :
+                                          correctRate >= 50 ? 'text-yellow-600' :
+                                          correctRate > 0 ? 'text-red-600' :
+                                          'text-gray-400'
+                                        }`}>
+                                          {totalAttempts > 0 ? `${correctRate}%` : '-'}
+                                        </span>
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-center">
+                                        <span className={`px-2 py-1 rounded font-bold text-xs ${
+                                          lastResult === "○" ? 'bg-green-100 text-green-700' :
+                                          lastResult === "×" ? 'bg-red-100 text-red-700' :
+                                          'text-gray-400'
+                                        }`}>
+                                          {lastResult}
+                                        </span>
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-center text-xs text-gray-600">
+                                        {lastDate !== "-" ? lastDate : "未学習"}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        {/* 戻るボタン */}
+                        <div className="flex justify-center">
+                          <button
+                            onClick={() => {
+                              setShowProgressModal(false);
+                              setProgressFolder(null);
+                              setProgressProblems([]);
+                            }}
+                            className="bg-indigo-600 text-white px-6 py-3 rounded-lg font-bold hover:bg-indigo-700 shadow-md"
+                          >
+                            宿題選択に戻る
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 殿堂入り問題モーダル */}
+              {showMasteredModal && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[70] overflow-y-auto">
+                  <div className="bg-white rounded-xl p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto space-y-4">
+                    <div className="flex items-center justify-between mb-4 sticky top-0 bg-white pb-3 border-b">
+                      <div>
+                        <h3 className="text-xl font-bold text-gray-800">
+                          👑 殿堂入り問題の再出題
+                        </h3>
+                        <p className="text-xs text-gray-500 mt-1">
+                          選択中のフォルダ: {selectedFolders.join(", ") || "なし"}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setShowMasteredModal(false);
+                          setSelectedMasteredIds([]);
+                        }}
+                        className="text-gray-600 hover:text-gray-800 font-bold text-xl"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    {masteredProblems.length === 0 ? (
+                      <div className="text-center py-12">
+                        <p className="text-gray-500 text-lg mb-2">
+                          選択中のフォルダに殿堂入り問題がありません
+                        </p>
+                        <p className="text-sm text-gray-400">
+                          3日連続で初回正解した問題が殿堂入りになります
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="bg-yellow-50 border-2 border-yellow-300 rounded-lg p-3">
+                          <p className="text-sm text-gray-700">
+                            <span className="font-bold text-yellow-700">👑 殿堂入り問題</span>とは、3日連続でその日の初回学習で正解した問題です。
+                          </p>
+                          <p className="text-sm text-gray-700 mt-1">
+                            再出題したい問題にチェックを入れて、「再出題リストに追加」ボタンを押してください。
+                          </p>
+                        </div>
+
+                        {/* フォルダフィルター */}
+                        <div className="bg-white border-2 border-gray-300 rounded-lg p-3">
+                          <label className="block text-sm font-bold text-gray-700 mb-2">
+                            📁 フォルダで絞り込み
+                          </label>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => setMasteredFilterFolder("全て")}
+                              className={`px-3 py-2 rounded-lg text-sm font-bold border-2 transition-all ${
+                                masteredFilterFolder === "全て"
+                                  ? "bg-indigo-600 text-white border-indigo-700 shadow-md"
+                                  : "bg-white text-gray-700 border-gray-300 hover:border-indigo-300"
+                              }`}
+                            >
+                              全て ({masteredProblems.length})
+                            </button>
+                            {Array.from(new Set(masteredProblems.map(p => p.subject))).map(folder => {
+                              const count = masteredProblems.filter(p => p.subject === folder).length;
+                              return (
+                                <button
+                                  key={folder}
+                                  onClick={() => setMasteredFilterFolder(folder)}
+                                  className={`px-3 py-2 rounded-lg text-sm font-bold border-2 transition-all ${
+                                    masteredFilterFolder === folder
+                                      ? "bg-indigo-600 text-white border-indigo-700 shadow-md"
+                                      : "bg-white text-gray-700 border-gray-300 hover:border-indigo-300"
+                                  }`}
+                                >
+                                  {folder} ({count})
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* 殿堂入り問題一覧表 */}
+                        <div className="bg-gradient-to-r from-yellow-50 to-orange-50 rounded-xl p-4 border-2 border-yellow-300">
+                          <h4 className="font-bold text-lg text-gray-800 mb-3">
+                            殿堂入り問題一覧
+                            {masteredFilterFolder === "全て"
+                              ? `（全${masteredProblems.length}問）`
+                              : `（${masteredFilterFolder}: ${masteredProblems.filter(p => p.subject === masteredFilterFolder).length}問）`
+                            }
+                          </h4>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm border-collapse">
+                              <thead>
+                                <tr className="bg-yellow-600 text-white">
+                                  <th className="border border-yellow-500 px-3 py-2 text-center">選択</th>
+                                  <th className="border border-yellow-500 px-3 py-2 text-left">No.</th>
+                                  <th className="border border-yellow-500 px-3 py-2 text-left">問題</th>
+                                  <th className="border border-yellow-500 px-3 py-2 text-center">回答数</th>
+                                  <th className="border border-yellow-500 px-3 py-2 text-center">正解率</th>
+                                  <th className="border border-yellow-500 px-3 py-2 text-center">過去5回の履歴</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {masteredProblems
+                                  .filter(p => masteredFilterFolder === "全て" || p.subject === masteredFilterFolder)
+                                  .map((problem, index) => {
+                                  const history = problem.history || [];
+                                  const totalAttempts = history.length;
+                                  const correctCount = history.filter(h => h.result === "○").length;
+                                  const correctRate = totalAttempts > 0
+                                    ? Math.round((correctCount / totalAttempts) * 100)
+                                    : 0;
+                                  const last5History = history.slice(-5).reverse();
+
+                                  return (
+                                    <tr
+                                      key={problem.id}
+                                      className={`${index % 2 === 0 ? 'bg-white' : 'bg-yellow-50'} hover:bg-yellow-100 transition-colors`}
+                                    >
+                                      <td className="border border-gray-300 px-3 py-2 text-center">
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedMasteredIds.includes(problem.id)}
+                                          onChange={() => {
+                                            setSelectedMasteredIds(prev =>
+                                              prev.includes(problem.id)
+                                                ? prev.filter(id => id !== problem.id)
+                                                : [...prev, problem.id]
+                                            );
+                                          }}
+                                          className="w-5 h-5 cursor-pointer"
+                                        />
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 font-bold text-gray-700">
+                                        {index + 1}
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-gray-800">
+                                        {problem.question_text.length > 30
+                                          ? problem.question_text.substring(0, 30) + "..."
+                                          : problem.question_text}
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-center text-gray-700">
+                                        {totalAttempts}回
+                                      </td>
+                                      <td className="border border-gray-300 px-3 py-2 text-center">
+                                        <span className={`font-bold ${
+                                          correctRate >= 80 ? 'text-green-600' :
+                                          correctRate >= 50 ? 'text-yellow-600' :
+                                          correctRate > 0 ? 'text-red-600' :
+                                          'text-gray-400'
+                                        }`}>
+                                          {totalAttempts > 0 ? `${correctRate}%` : '-'}
+                                        </span>
+                                      </td>
+                                      <td className="border border-gray-300 px-2 py-2">
+                                        <div className="flex flex-col gap-1 text-xs">
+                                          {last5History.length > 0 ? (
+                                            last5History.map((h, i) => (
+                                              <div key={i} className="flex items-center justify-between gap-2">
+                                                <span className={`px-2 py-0.5 rounded font-bold ${
+                                                  h.result === "○" ? 'bg-green-100 text-green-700' :
+                                                  h.result === "×" ? 'bg-red-100 text-red-700' :
+                                                  h.result === "△" ? 'bg-yellow-100 text-yellow-700' :
+                                                  'text-gray-400'
+                                                }`}>
+                                                  {h.result}
+                                                </span>
+                                                <span className="text-gray-600 text-[10px]">
+                                                  {h.date}
+                                                </span>
+                                              </div>
+                                            ))
+                                          ) : (
+                                            <span className="text-gray-400 text-center">未学習</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        {/* ボタン */}
+                        <div className="flex gap-3 justify-center">
+                          <button
+                            onClick={() => {
+                              setShowMasteredModal(false);
+                              setSelectedMasteredIds([]);
+                            }}
+                            className="bg-gray-400 text-white px-6 py-3 rounded-lg font-bold hover:bg-gray-500 shadow-md"
+                          >
+                            キャンセル
+                          </button>
+                          <button
+                            onClick={addTriangleToMastered}
+                            disabled={selectedMasteredIds.length === 0}
+                            className="bg-gradient-to-r from-orange-500 to-red-500 disabled:from-gray-300 disabled:to-gray-400 text-white px-8 py-3 rounded-lg font-bold hover:from-orange-600 hover:to-red-600 shadow-lg disabled:shadow-none transition-all"
+                          >
+                            {selectedMasteredIds.length > 0
+                              ? `${selectedMasteredIds.length}問を再出題リストに追加`
+                              : "問題を選択してください"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -3094,35 +3828,192 @@ export default function Home() {
               )}
               {mode === "export" && (
                 <div>
-                  <p className="mb-2">フォルダを選んで出力</p>
-                  <div className="flex flex-wrap gap-2 mb-2">
-                    {availableFolders.map((f) => (
-                      <button
-                        key={f}
-                        onClick={() => toggleFolder(f)}
-                        className={`border px-2 ${
-                          selectedFolders.includes(f)
-                            ? "bg-blue-500 text-white"
-                            : "bg-white"
-                        }`}
-                      >
-                        {f}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={generateExportData}
-                    className="bg-green-600 text-white p-2 w-full rounded font-bold"
-                  >
-                    出力
-                  </button>
-                  {exportData.length > 0 && (
-                    <button
-                      onClick={copyToClipboard}
-                      className="bg-green-500 text-white p-2 w-full mt-2 rounded"
-                    >
-                      コピー
-                    </button>
+                  {!exportSelectedFolder ? (
+                    // フォルダ選択画面
+                    <div>
+                      <p className="mb-4 text-lg font-bold text-gray-700">📁 フォルダを選択してください</p>
+                      <div className="grid grid-cols-2 gap-3 mb-4">
+                        {availableFolders.map((f) => (
+                          <button
+                            key={f}
+                            onClick={() => selectFolderForExport(f)}
+                            className="bg-gradient-to-r from-indigo-500 to-indigo-600 text-white p-4 rounded-xl font-bold shadow-lg hover:from-indigo-600 hover:to-indigo-700 transition-all transform hover:scale-105"
+                          >
+                            📂 {f}
+                            <div className="text-xs mt-1 opacity-90">
+                              {folderCounts[f] || 0}問
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    // 問題一覧表示画面
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xl font-bold text-gray-800">
+                          📂 {exportSelectedFolder}
+                        </h3>
+                        <button
+                          onClick={() => {
+                            setExportSelectedFolder(null);
+                            setExportFolderProblems([]);
+                          }}
+                          className="text-gray-600 hover:text-gray-800 font-bold"
+                        >
+                          ← 戻る
+                        </button>
+                      </div>
+
+                      {exportFolderProblems.length === 0 ? (
+                        <p className="text-gray-500 text-center py-8">問題がありません</p>
+                      ) : (
+                        <div className="space-y-6">
+                          {/* 進捗サマリー表 */}
+                          <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl p-4 border-2 border-indigo-200">
+                            <h4 className="font-bold text-lg text-gray-800 mb-3 flex items-center gap-2">
+                              📊 学習進捗一覧
+                              <span className="text-sm font-normal text-gray-600">
+                                （全{exportFolderProblems.length}問）
+                              </span>
+                            </h4>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-sm border-collapse">
+                                <thead>
+                                  <tr className="bg-indigo-600 text-white">
+                                    <th className="border border-indigo-500 px-3 py-2 text-left">No.</th>
+                                    <th className="border border-indigo-500 px-3 py-2 text-left">問題</th>
+                                    <th className="border border-indigo-500 px-3 py-2 text-center">回答数</th>
+                                    <th className="border border-indigo-500 px-3 py-2 text-center">正解率</th>
+                                    <th className="border border-indigo-500 px-3 py-2 text-center">最終結果</th>
+                                    <th className="border border-indigo-500 px-3 py-2 text-center">最終回答日</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {exportFolderProblems.map((problem, index) => {
+                                    const history = problem.history || [];
+                                    const totalAttempts = history.length;
+                                    const correctCount = history.filter(h => h.result === "○").length;
+                                    const correctRate = totalAttempts > 0
+                                      ? Math.round((correctCount / totalAttempts) * 100)
+                                      : 0;
+                                    const lastResult = history.length > 0 ? history[history.length - 1].result : "-";
+                                    const lastDate = history.length > 0 ? history[history.length - 1].date : "-";
+
+                                    return (
+                                      <tr
+                                        key={problem.id}
+                                        className={`${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-indigo-50 transition-colors`}
+                                      >
+                                        <td className="border border-gray-300 px-3 py-2 font-bold text-gray-700">
+                                          {index + 1}
+                                        </td>
+                                        <td className="border border-gray-300 px-3 py-2 text-gray-800">
+                                          {problem.question_text.length > 30
+                                            ? problem.question_text.substring(0, 30) + "..."
+                                            : problem.question_text}
+                                        </td>
+                                        <td className="border border-gray-300 px-3 py-2 text-center text-gray-700">
+                                          {totalAttempts}回
+                                        </td>
+                                        <td className="border border-gray-300 px-3 py-2 text-center">
+                                          <span className={`font-bold ${
+                                            correctRate >= 80 ? 'text-green-600' :
+                                            correctRate >= 50 ? 'text-yellow-600' :
+                                            correctRate > 0 ? 'text-red-600' :
+                                            'text-gray-400'
+                                          }`}>
+                                            {totalAttempts > 0 ? `${correctRate}%` : '-'}
+                                          </span>
+                                        </td>
+                                        <td className="border border-gray-300 px-3 py-2 text-center">
+                                          <span className={`px-2 py-1 rounded font-bold text-xs ${
+                                            lastResult === "○" ? 'bg-green-100 text-green-700' :
+                                            lastResult === "×" ? 'bg-red-100 text-red-700' :
+                                            'text-gray-400'
+                                          }`}>
+                                            {lastResult}
+                                          </span>
+                                        </td>
+                                        <td className="border border-gray-300 px-3 py-2 text-center text-xs text-gray-600">
+                                          {lastDate !== "-" ? lastDate : "未学習"}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+
+                          {/* 問題詳細リスト */}
+                          <div>
+                            <h4 className="font-bold text-lg text-gray-800 mb-3">📝 問題詳細</h4>
+                            <div className="space-y-4 max-h-[500px] overflow-y-auto">
+                              {exportFolderProblems.map((problem, index) => {
+                                // 過去5回分の履歴を取得
+                                const recentHistory = (problem.history || []).slice(-5);
+
+                                return (
+                                  <div
+                                    key={problem.id}
+                                    className="bg-white border-2 border-gray-200 rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow"
+                                  >
+                                    <div className="flex items-start justify-between mb-2">
+                                      <div className="flex-1">
+                                        <div className="font-bold text-gray-800 mb-1">
+                                          問{index + 1}: {problem.question_text}
+                                        </div>
+                                        <div className="text-sm text-gray-600 mb-2">
+                                          答え: {problem.answer_text}
+                                        </div>
+                                        {problem.explanation && (
+                                          <div className="text-xs text-gray-500 mb-2">
+                                            解説: {problem.explanation}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* 正誤履歴（過去5回分） */}
+                                    <div className="mt-3 pt-3 border-t border-gray-200">
+                                      <div className="text-xs font-bold text-gray-600 mb-2">
+                                        📊 最近の正誤履歴（過去5回分）
+                                      </div>
+                                      {recentHistory.length === 0 ? (
+                                        <div className="text-xs text-gray-400 italic">
+                                          まだ学習していません
+                                        </div>
+                                      ) : (
+                                        <div className="flex gap-1">
+                                          {recentHistory.map((h, i) => (
+                                            <div
+                                              key={i}
+                                              className={`px-2 py-1 rounded text-xs font-bold ${
+                                                h.result === "○"
+                                                  ? "bg-green-100 text-green-700"
+                                                  : "bg-red-100 text-red-700"
+                                              }`}
+                                            >
+                                              {h.result}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {recentHistory.length > 0 && (
+                                        <div className="text-xs text-gray-400 mt-1">
+                                          最終: {recentHistory[recentHistory.length - 1].date}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
