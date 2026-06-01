@@ -75,8 +75,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'ユーザー作成に失敗しました: ' + createError?.message }, { status: 500 });
     }
 
-    // 2. 招待コードを生成
-    const invite_code = Math.random().toString(36).substring(2, 10).toUpperCase();
+    // 2. 招待コードを生成（衝突チェック付き・暗号論的乱数使用）
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let invite_code = "";
+    for (let attempts = 0; attempts < 5; attempts++) {
+      const candidate = Array.from(
+        { length: 8 },
+        () => chars[Math.floor(crypto.getRandomValues(new Uint8Array(1))[0] / 256 * chars.length)]
+      ).join("");
+      const { data: existing } = await supabaseAdmin
+        .from("profiles")
+        .select("id")
+        .eq("invite_code", candidate)
+        .maybeSingle();
+      if (!existing) { invite_code = candidate; break; }
+    }
+    if (!invite_code) {
+      return NextResponse.json({ error: "招待コードの生成に失敗しました。再度お試しください" }, { status: 500 });
+    }
 
     // 3. profilesテーブルに登録
     const { error: profileError } = await supabaseAdmin

@@ -46,16 +46,26 @@ type Message = {
 };
 type StudentProblemRow = {
   problem_id: number;
-  problems: Problem | null;
+  problems: any; // Supabase は型生成なしでは join 結果を any[] として推論するため any を使用
 };
 
 const isProblem = (p: Problem | null | undefined): p is Problem => p != null;
+
+const formatError = (message: string): string => {
+  if (message.includes("User already registered")) return "このアカウントはすでに登録されています";
+  if (message.includes("Invalid login credentials")) return "メールアドレス（または生徒名）かパスワードが正しくありません";
+  if (message.includes("duplicate key")) return "すでに登録済みのデータです";
+  if (message.includes("Email not confirmed")) return "メールアドレスの確認が完了していません";
+  if (message.includes("fetch") || message.includes("network")) return "通信エラーが発生しました。再度お試しください";
+  return message;
+};
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [status, setStatus] = useState("");
   const [mode, setMode] = useState("menu");
   const [isAdminMode, setIsAdminMode] = useState(false); // 管理者モード
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -283,7 +293,7 @@ export default function Home() {
         message_text: text.trim(),
       });
     if (error) {
-      setStatus("❌ メッセージの送信に失敗しました: " + error.message);
+      setStatus("❌ メッセージの送信に失敗しました: " + formatError(error.message));
       return false;
     }
     setStatus("✅ メッセージを送信しました");
@@ -385,7 +395,7 @@ export default function Home() {
       email: loginEmail,
       password,
     });
-    if (error) setStatus("エラー: " + error.message);
+    if (error) setStatus("エラー: " + formatError(error.message));
   };
   const handleSignUp = async () => {
     if (!fullName) {
@@ -396,6 +406,12 @@ export default function Home() {
       setStatus("⚠️ 先生の招待コードを入力してください");
       return;
     }
+    if (!/^[a-zA-Z0-9぀-ゟ゠-ヿ一-鿿_-]+$/.test(fullName.trim())) {
+      setStatus("⚠️ 生徒名にスペースや @ などの記号は使用できません");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
 
     // 招待コードの検証
     const { data: teacher, error: teacherError } = await supabase
@@ -447,7 +463,7 @@ export default function Home() {
     });
 
     if (error) {
-      setStatus("エラー: " + error.message);
+      setStatus("エラー: " + formatError(error.message));
       return;
     }
 
@@ -467,8 +483,11 @@ export default function Home() {
       }
     }
 
-    setStatus(`✅ 登録完了！ログイン名「${fullName}」でログインしてください`);
-    setInviteCode("");
+      setStatus(`✅ 登録完了！ログイン名「${fullName}」でログインしてください`);
+      setInviteCode("");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -539,7 +558,7 @@ export default function Home() {
       .eq("id", session.user.id);
 
     if (error) {
-      setStatus("更新失敗: " + error.message);
+      setStatus("更新失敗: " + formatError(error.message));
     } else {
       setStatus("暗証番号を更新しました！");
       setNewTeacherPassword("");
@@ -558,7 +577,7 @@ export default function Home() {
         .eq("id", session.user.id);
 
       if (error) {
-        setStatus("エラー: " + error.message);
+        setStatus("エラー: " + formatError(error.message));
       } else {
         setStatus("✅ 無制限ライセンスを有効化しました！");
         setUnlimitedLicensePassword("");
@@ -618,6 +637,7 @@ export default function Home() {
     const targetId =
       isTeacherMode && targetStudent ? targetStudent.id : session.user.id;
     if (!targetId) return;
+    setIsSubmitting(true);
     setStatus("保存中...");
     try {
       const count = await saveProblemsToDB(
@@ -632,7 +652,9 @@ export default function Home() {
       if (!isTeacherMode) fetchFolders(targetId);
       else fetchTargetStudentFolders(targetId);
     } catch (error: any) {
-      setStatus("保存失敗: " + error.message);
+      setStatus("保存失敗: " + formatError(error.message));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -646,6 +668,7 @@ export default function Home() {
       setStatus("問題文と答えを入力してください");
       return;
     }
+    setIsSubmitting(true);
     setStatus("保存中...");
     try {
       const now = new Date().toISOString();
@@ -681,7 +704,9 @@ export default function Home() {
       if (!isTeacherMode) fetchFolders(targetId);
       else fetchTargetStudentFolders(targetId);
     } catch (error: any) {
-      setStatus("保存失敗: " + error.message);
+      setStatus("保存失敗: " + formatError(error.message));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -710,7 +735,7 @@ export default function Home() {
       loadEditProblems();
       fetchFolders(session.user.id);
     } catch (error: any) {
-      setStatus("更新失敗: " + error.message);
+      setStatus("更新失敗: " + formatError(error.message));
     }
   };
 
@@ -729,7 +754,7 @@ export default function Home() {
       loadEditProblems();
       fetchFolders(session.user.id);
     } catch (error: any) {
-      setStatus("削除失敗: " + error.message);
+      setStatus("削除失敗: " + formatError(error.message));
     }
   };
 
@@ -783,7 +808,7 @@ export default function Home() {
 
     const { data, error } = await query;
     if (error) {
-      setStatus("エラー: " + error.message);
+      setStatus("エラー: " + formatError(error.message));
       return;
     }
 
@@ -838,7 +863,7 @@ export default function Home() {
       .eq("student_id", student.id);
 
     if (assignedData) {
-      const problems = assignedData.map((item: StudentProblemRow) => item.problems);
+      const problems = assignedData.map((item: StudentProblemRow) => item.problems).filter(isProblem);
       setAssignedProblems(problems);
     }
   };
@@ -869,18 +894,36 @@ export default function Home() {
       return;
     }
     const today = new Date().toISOString().split("T")[0];
-    const records = homeworkFolders.map((f) => ({
-      student_id: targetStudent.id,
-      folder_name: f,
-      assigned_date: today,
-    }));
-    const { error } = await supabase.from("homeworks").insert(records);
-    if (error) {
-      setStatus("❌ 宿題の送信に失敗しました: " + error.message);
-    } else {
-      setStatus(
-        `✅ 宿題を送信しました！「${homeworkFolders.join(", ")}」を今日の宿題に設定しました。`
-      );
+
+    // 今日すでに設定済みの宿題フォルダを取得して重複を除外
+    const { data: existing } = await supabase
+      .from("homeworks")
+      .select("folder_name")
+      .eq("student_id", targetStudent.id)
+      .eq("assigned_date", today);
+    const existingFolders = existing?.map((h: { folder_name: string }) => h.folder_name) || [];
+    const newFolders = homeworkFolders.filter(f => !existingFolders.includes(f));
+
+    if (newFolders.length === 0) {
+      setStatus("⚠️ 選択したフォルダはすでに今日の宿題に設定済みです");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const records = newFolders.map((f) => ({
+        student_id: targetStudent.id,
+        folder_name: f,
+        assigned_date: today,
+      }));
+      const { error } = await supabase.from("homeworks").insert(records);
+      if (error) {
+        setStatus("❌ 宿題の送信に失敗しました: " + formatError(error.message));
+      } else {
+        setStatus(`✅ 宿題を送信しました！「${newFolders.join(", ")}」を今日の宿題に設定しました。`);
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -892,8 +935,7 @@ export default function Home() {
       .eq("is_teacher", true);
 
     if (error) {
-      console.error("先生一覧の取得エラー:", error);
-      setStatus(`❌ 先生一覧の取得に失敗しました: ${error.message}`);
+      setStatus(`❌ 先生一覧の取得に失敗しました: ${formatError(error.message)}`);
       setAllTeachers([]);
       return;
     }
@@ -946,7 +988,7 @@ export default function Home() {
         setStatus(`❌ 登録失敗: ${result.error}`);
       }
     } catch (error: any) {
-      setStatus(`❌ エラー: ${error.message}`);
+      setStatus(`❌ エラー: ${formatError(error.message)}`);
     }
   };
 
@@ -980,7 +1022,7 @@ export default function Home() {
         setStatus(`❌ 更新失敗: ${result.error}`);
       }
     } catch (error: any) {
-      setStatus(`❌ エラー: ${error.message}`);
+      setStatus(`❌ エラー: ${formatError(error.message)}`);
     }
   };
 
@@ -1021,7 +1063,7 @@ export default function Home() {
         setStatus(`❌ 削除失敗: ${result.error}`);
       }
     } catch (error: any) {
-      setStatus(`❌ エラー: ${error.message}`);
+      setStatus(`❌ エラー: ${formatError(error.message)}`);
     }
   };
 
@@ -1049,7 +1091,7 @@ export default function Home() {
     const { error } = await supabase.from("student_problems").insert(records);
 
     if (error) {
-      setStatus("割り当て失敗: " + error.message);
+      setStatus("割り当て失敗: " + formatError(error.message));
     } else {
       setStatus(`${selectedProblemIds.length}問を割り当てました！`);
       setSelectedProblemIds([]);
@@ -1066,18 +1108,18 @@ export default function Home() {
       .eq("student_id", targetStudent.id);
 
     if (error) {
-      console.error("Error loading assigned problems:", error);
       return;
     }
 
     if (data) {
-      const problems = data.map((item: StudentProblemRow) => item.problems);
+      const problems = data.map((item: StudentProblemRow) => item.problems).filter(isProblem);
       setAssignedProblems(problems);
     }
   };
 
   const unassignProblem = async (problemId: number) => {
     if (!targetStudent) return;
+    if (!confirm("この問題の割り当てを解除しますか？")) return;
 
     const { error } = await supabase
       .from("student_problems")
@@ -1086,7 +1128,7 @@ export default function Home() {
       .eq("problem_id", problemId);
 
     if (error) {
-      setStatus("削除失敗: " + error.message);
+      setStatus("削除失敗: " + formatError(error.message));
     } else {
       setStatus("割り当てを解除しました");
       loadAssignedProblems();
@@ -1099,7 +1141,7 @@ export default function Home() {
     const { error } = await supabase.from("problems").delete().eq("id", id);
 
     if (error) {
-      setStatus("削除失敗: " + error.message);
+      setStatus("削除失敗: " + formatError(error.message));
     } else {
       setStatus("問題を削除しました");
       loadEditProblems();
@@ -1120,7 +1162,7 @@ export default function Home() {
       .eq("id", editingProblem.id);
 
     if (error) {
-      setStatus("更新失敗: " + error.message);
+      setStatus("更新失敗: " + formatError(error.message));
     } else {
       setStatus("問題を更新しました");
       setEditingProblem(null);
@@ -1722,7 +1764,8 @@ export default function Home() {
               </button>
               <button
                 onClick={handleSignUp}
-                className="w-full text-indigo-600 text-sm font-bold"
+                disabled={isSubmitting}
+                className="w-full text-indigo-600 text-sm font-bold disabled:opacity-50"
               >
                 🎓 生徒として新規登録
               </button>
@@ -2085,7 +2128,7 @@ export default function Home() {
                               });
 
                             if (error) {
-                              setStatus("エラー: " + error.message);
+                              setStatus("エラー: " + formatError(error.message));
                             } else {
                               setStatus(`✅ ${f}の${problems.length}問を割り当てました！`);
                               loadAssignedProblems();
@@ -2240,7 +2283,8 @@ export default function Home() {
                   )}
                   <button
                     onClick={assignHomework}
-                    className="w-full bg-orange-500 text-white p-3 rounded font-bold hover:bg-orange-600"
+                    disabled={isSubmitting}
+                    className="w-full bg-orange-500 text-white p-3 rounded font-bold hover:bg-orange-600 disabled:opacity-50"
                   >
                     宿題を送信する
                   </button>
@@ -2265,7 +2309,8 @@ export default function Home() {
                   />
                   <button
                     onClick={handleImport}
-                    className="w-full bg-indigo-600 text-white p-2 rounded font-bold"
+                    disabled={isSubmitting}
+                    className="w-full bg-indigo-600 text-white p-2 rounded font-bold disabled:opacity-50"
                   >
                     追加する
                   </button>
@@ -2438,7 +2483,8 @@ export default function Home() {
                     </div>
                     <button
                       onClick={handleImport}
-                      className="w-full bg-indigo-600 text-white p-3 rounded font-bold hover:bg-indigo-700"
+                      disabled={isSubmitting}
+                      className="w-full bg-indigo-600 text-white p-3 rounded font-bold hover:bg-indigo-700 disabled:opacity-50"
                     >
                       ➕ 問題を追加
                     </button>
@@ -2492,7 +2538,8 @@ export default function Home() {
                     </div>
                     <button
                       onClick={handleManualAdd}
-                      className="w-full bg-indigo-600 text-white p-3 rounded font-bold hover:bg-indigo-700"
+                      disabled={isSubmitting}
+                      className="w-full bg-indigo-600 text-white p-3 rounded font-bold hover:bg-indigo-700 disabled:opacity-50"
                     >
                       ➕ 問題を追加
                     </button>
@@ -3817,7 +3864,8 @@ export default function Home() {
                       />
                       <button
                         onClick={handleImport}
-                        className="bg-indigo-600 text-white p-3 w-full rounded font-bold hover:bg-indigo-700 transition-colors"
+                        disabled={isSubmitting}
+                        className="bg-indigo-600 text-white p-3 w-full rounded font-bold hover:bg-indigo-700 transition-colors disabled:opacity-50"
                       >
                         💾 保存
                       </button>
@@ -3874,7 +3922,8 @@ export default function Home() {
                       </div>
                       <button
                         onClick={handleManualAdd}
-                        className="bg-indigo-600 text-white p-3 w-full rounded font-bold hover:bg-indigo-700 transition-colors mt-2"
+                        disabled={isSubmitting}
+                        className="bg-indigo-600 text-white p-3 w-full rounded font-bold hover:bg-indigo-700 transition-colors mt-2 disabled:opacity-50"
                       >
                         ➕ 問題を追加
                       </button>
