@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabaseClient";
 
 // --- 型定義 ---
@@ -43,9 +44,15 @@ type Message = {
   created_at: string;
   is_read: boolean;
 };
+type StudentProblemRow = {
+  problem_id: number;
+  problems: Problem | null;
+};
+
+const isProblem = (p: Problem | null | undefined): p is Problem => p != null;
 
 export default function Home() {
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [status, setStatus] = useState("");
   const [mode, setMode] = useState("menu");
   const [isAdminMode, setIsAdminMode] = useState(false); // 管理者モード
@@ -205,7 +212,7 @@ export default function Home() {
 
     if (studentProblems) {
       const counts: { [key: string]: number } = {};
-      studentProblems.forEach((sp: any) => {
+      studentProblems.forEach((sp: StudentProblemRow) => {
         if (sp.problems) {
           const subj = sp.problems.subject || "未分類";
           counts[subj] = (counts[subj] || 0) + 1;
@@ -336,7 +343,7 @@ export default function Home() {
       return;
     }
 
-    const problems = studentProblems.map((sp: any) => sp.problems).filter(Boolean);
+    const problems = studentProblems.map((sp: StudentProblemRow) => sp.problems).filter(isProblem);
 
     // 未完了の宿題フォルダを抽出
     const incompleteHomeworks: string[] = [];
@@ -471,7 +478,7 @@ export default function Home() {
   const handleUpdateProfile = async () => {
     if (!session) return;
     setStatus("更新中...");
-    const updates: any = { data: { full_name: myPageName } };
+    const updates: { data: { full_name: string }; email?: string; password?: string } = { data: { full_name: myPageName } };
     if (myPageEmail !== session.user.email) updates.email = myPageEmail;
     if (myPagePassword) updates.password = myPagePassword;
 
@@ -607,6 +614,7 @@ export default function Home() {
   };
 
   const handleImport = async () => {
+    if (!session) return;
     const targetId =
       isTeacherMode && targetStudent ? targetStudent.id : session.user.id;
     if (!targetId) return;
@@ -630,6 +638,7 @@ export default function Home() {
 
   // 手動入力の保存処理
   const handleManualAdd = async () => {
+    if (!session) return;
     const targetId =
       isTeacherMode && targetStudent ? targetStudent.id : session.user.id;
     if (!targetId) return;
@@ -679,7 +688,7 @@ export default function Home() {
   // 編集モード: 問題一覧を取得
   // 問題を更新
   const handleUpdateProblem = async () => {
-    if (!editingProblem) return;
+    if (!session || !editingProblem) return;
     if (!editQuestion.trim() || !editAnswer.trim()) {
       setStatus("問題文と答えを入力してください");
       return;
@@ -707,6 +716,7 @@ export default function Home() {
 
   // 問題を削除
   const handleDeleteProblem = async (problemId: number) => {
+    if (!session) return;
     if (!confirm("この問題を削除しますか？")) return;
     setStatus("削除中...");
     try {
@@ -742,7 +752,7 @@ export default function Home() {
         .eq("student_id", session.user.id);
 
       if (studentProblems) {
-        const problems = studentProblems.map((sp: any) => sp.problems).filter(Boolean);
+        const problems = studentProblems.map((sp: StudentProblemRow) => sp.problems).filter(isProblem);
 
         // フィルタ適用
         let filtered = problems;
@@ -828,7 +838,7 @@ export default function Home() {
       .eq("student_id", student.id);
 
     if (assignedData) {
-      const problems = assignedData.map((item: any) => item.problems);
+      const problems = assignedData.map((item: StudentProblemRow) => item.problems);
       setAssignedProblems(problems);
     }
   };
@@ -842,7 +852,7 @@ export default function Home() {
 
     if (studentProblems) {
       const counts: { [key: string]: number } = {};
-      studentProblems.forEach((sp: any) => {
+      studentProblems.forEach((sp: StudentProblemRow) => {
         if (sp.problems) {
           const subj = sp.problems.subject || "未分類";
           counts[subj] = (counts[subj] || 0) + 1;
@@ -1061,7 +1071,7 @@ export default function Home() {
     }
 
     if (data) {
-      const problems = data.map((item: any) => item.problems);
+      const problems = data.map((item: StudentProblemRow) => item.problems);
       setAssignedProblems(problems);
     }
   };
@@ -1119,6 +1129,7 @@ export default function Home() {
   };
 
   const generateExportData = async () => {
+    if (!session) return;
     const targetId =
       isTeacherMode && targetStudent ? targetStudent.id : session.user.id;
     if (!selectedFolders.length) {
@@ -1136,8 +1147,8 @@ export default function Home() {
     }
 
     const data = studentProblems
-      .map((sp: any) => sp.problems)
-      .filter((p: any) => p && selectedFolders.includes(p.subject));
+      .map((sp: StudentProblemRow) => sp.problems)
+      .filter((p): p is Problem => p !== null && selectedFolders.includes(p.subject));
 
     const rows: ExportRow[] = [];
     const start = new Date(exportStartDate);
@@ -1175,6 +1186,7 @@ export default function Home() {
     isWeakMode: boolean,
     isHomework: boolean = false
   ) => {
+    if (!session) return;
     const targetId = session.user.id;
     let foldersToUse = selectedFolders;
 
@@ -1206,7 +1218,7 @@ export default function Home() {
     }
 
     // problems データを抽出
-    let data = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+    let data = studentProblems?.map((sp: StudentProblemRow) => sp.problems).filter(isProblem) || [];
 
     // フォルダでフィルタ
     data = data.filter((p: Problem) => foldersToUse.includes(p.subject));
@@ -1414,6 +1426,7 @@ export default function Home() {
 
   // フォルダを選択して問題と正誤履歴を表示
   const selectFolderForExport = async (folder: string) => {
+    if (!session) return;
     setExportSelectedFolder(folder);
     setStatus("読み込み中...");
 
@@ -1431,7 +1444,7 @@ export default function Home() {
     }
 
     // problems データを抽出してフォルダでフィルタ
-    const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+    const allProblems = studentProblems?.map((sp: StudentProblemRow) => sp.problems).filter(isProblem) || [];
     const folderProblems = allProblems.filter((p: Problem) => p.subject === folder);
 
     setExportFolderProblems(folderProblems);
@@ -1440,6 +1453,7 @@ export default function Home() {
 
   // 宿題選択画面から進捗を確認
   const showFolderProgress = async (folder: string) => {
+    if (!session) return;
     setProgressFolder(folder);
     setStatus("読み込み中...");
 
@@ -1457,7 +1471,7 @@ export default function Home() {
     }
 
     // problems データを抽出してフォルダでフィルタ
-    const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+    const allProblems = studentProblems?.map((sp: StudentProblemRow) => sp.problems).filter(isProblem) || [];
     const folderProblems = allProblems.filter((p: Problem) => p.subject === folder);
 
     setProgressProblems(folderProblems);
@@ -1467,6 +1481,7 @@ export default function Home() {
 
   // 殿堂入り問題を表示
   const showMasteredProblems = async () => {
+    if (!session) return;
     // 選択中のフォルダがない場合はエラー
     if (selectedFolders.length === 0) {
       setStatus("⚠️ フォルダを選択してください");
@@ -1489,7 +1504,7 @@ export default function Home() {
     }
 
     // problems データを抽出
-    const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
+    const allProblems = studentProblems?.map((sp: StudentProblemRow) => sp.problems).filter(isProblem) || [];
 
     // 選択中のフォルダの殿堂入り問題のみをフィルタ（クライアント側で再判定）
     const mastered = allProblems.filter((p: Problem) => {
@@ -1513,6 +1528,7 @@ export default function Home() {
 
   // 選択した殿堂入り問題に△マークを追加
   const addTriangleToMastered = async () => {
+    if (!session) return;
     if (selectedMasteredIds.length === 0) {
       setStatus("⚠️ 再出題する問題を選択してください");
       return;
@@ -4244,7 +4260,7 @@ export default function Home() {
                         </button>
                         <button
                           onClick={() => {
-                            const updates: any = {};
+                            const updates: { student_limit?: number; has_unlimited_license?: boolean; teacher_password?: string } = {};
                             const limitInput = document.getElementById(`limit-${teacher.id}`) as HTMLInputElement;
                             const passwordInput = document.getElementById(`password-${teacher.id}`) as HTMLInputElement;
                             const unlimitedCheckbox = document.getElementById(`unlimited-${teacher.id}`) as HTMLInputElement;
