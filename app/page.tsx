@@ -502,7 +502,7 @@ export default function Home() {
     if (!session || !userProfile) return;
 
     // ユーザー設定の暗証番号またはデフォルト暗証番号でチェック
-    const correctPassword = userProfile.teacher_password || "soromonnoyubiwa";
+    const correctPassword = userProfile.teacher_password || "testpass";
 
     if (settingsPassword === correctPassword) {
       // 招待コードがなければ生成
@@ -545,7 +545,7 @@ export default function Home() {
   const unlockUnlimitedLicense = async () => {
     if (!session) return;
 
-    if (unlimitedLicensePassword === "soromonnoyubiwa") {
+    if (unlimitedLicensePassword === "testpass") {
       const { error } = await supabase
         .from("profiles")
         .update({ has_unlimited_license: true })
@@ -1813,7 +1813,7 @@ export default function Home() {
                       先生モード用の暗証番号を変更
                     </label>
                     <p className="text-xs text-gray-500 mb-2">
-                      現在の暗証番号: {userProfile.teacher_password ? "設定済み" : "デフォルト (soromonnoyubiwa)"}
+                      現在の暗証番号: {userProfile.teacher_password ? "設定済み" : "デフォルト (testpass)"}
                     </p>
                     <input
                       type="text"
