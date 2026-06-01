@@ -61,7 +61,13 @@ export async function POST(req: NextRequest) {
     // Admin用クライアントで削除
     const supabaseAdmin = getAdminClient();
 
-    // 1. Authユーザーを削除（これによりカスケードでprofilesも削除される）
+    // 1. 生徒の teacher_id を null にして孤立を防ぐ
+    await supabaseAdmin
+      .from('profiles')
+      .update({ teacher_id: null })
+      .eq('teacher_id', teacher_id);
+
+    // 2. Authユーザーを削除（カスケードでprofilesも削除される）
     const { error: deleteError } = await supabaseAdmin.auth.admin.deleteUser(teacher_id);
 
     if (deleteError) {
