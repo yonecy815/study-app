@@ -419,13 +419,13 @@ export default function Home() {
     }
 
     // 生徒名の重複チェック
-    const { data: existingStudent } = await supabase
+    const { data: existingStudents } = await supabase
       .from("profiles")
       .select("id")
       .eq("student_login_name", fullName)
-      .single();
+      .limit(1);
 
-    if (existingStudent) {
+    if (existingStudents && existingStudents.length > 0) {
       setStatus("⚠️ この生徒名は既に使用されています。別の名前を選んでください");
       return;
     }
@@ -460,7 +460,7 @@ export default function Home() {
       }
     }
 
-    setStatus(`登録完了！ログイン名「${fullName}」でログインしてください`);
+    setStatus(`✅ 登録完了！ログイン名「${fullName}」でログインしてください`);
     setInviteCode("");
   };
   const handleLogout = async () => {
@@ -677,24 +677,6 @@ export default function Home() {
   };
 
   // 編集モード: 問題一覧を取得
-  const fetchAllProblemsForEdit = async () => {
-    if (!session) return;
-    setStatus("問題を読み込み中...");
-    try {
-      const { data, error } = await supabase
-        .from("problems")
-        .select("*")
-        .eq("user_id", session.user.id)
-        .order("subject", { ascending: true })
-        .order("id", { ascending: true });
-      if (error) throw error;
-      setEditProblems(data || []);
-      setStatus(`${data?.length || 0} 件の問題を読み込みました`);
-    } catch (error: any) {
-      setStatus("読み込み失敗: " + error.message);
-    }
-  };
-
   // 問題を更新
   const handleUpdateProblem = async () => {
     if (!editingProblem) return;
@@ -716,7 +698,7 @@ export default function Home() {
       if (error) throw error;
       setStatus("問題を更新しました！");
       setEditingProblem(null);
-      fetchAllProblemsForEdit();
+      loadEditProblems();
       fetchFolders(session.user.id);
     } catch (error: any) {
       setStatus("更新失敗: " + error.message);
@@ -734,7 +716,7 @@ export default function Home() {
         .eq("id", problemId);
       if (error) throw error;
       setStatus("問題を削除しました");
-      fetchAllProblemsForEdit();
+      loadEditProblems();
       fetchFolders(session.user.id);
     } catch (error: any) {
       setStatus("削除失敗: " + error.message);
@@ -908,7 +890,6 @@ export default function Home() {
 
     if (data) {
       setAllTeachers(data);
-      console.log("取得した先生:", data);
     }
   };
 
@@ -1145,15 +1126,18 @@ export default function Home() {
       return;
     }
     setStatus("集計中...");
-    const { data } = await supabase
-      .from("problems")
-      .select("*")
-      .eq("user_id", targetId)
-      .in("subject", selectedFolders);
-    if (!data) {
+    const { data: studentProblems } = await supabase
+      .from("student_problems")
+      .select("problem_id, problems(*)")
+      .eq("student_id", targetId);
+    if (!studentProblems) {
       setStatus("データなし");
       return;
     }
+
+    const data = studentProblems
+      .map((sp: any) => sp.problems)
+      .filter((p: any) => p && selectedFolders.includes(p.subject));
 
     const rows: ExportRow[] = [];
     const start = new Date(exportStartDate);
@@ -1507,9 +1491,6 @@ export default function Home() {
     // problems データを抽出
     const allProblems = studentProblems?.map((sp: any) => sp.problems).filter(Boolean) || [];
 
-    console.log("選択中のフォルダ:", selectedFolders);
-    console.log("全問題数:", allProblems.length);
-
     // 選択中のフォルダの殿堂入り問題のみをフィルタ（クライアント側で再判定）
     const mastered = allProblems.filter((p: Problem) => {
       // 選択中のフォルダに含まれているか
@@ -1522,8 +1503,6 @@ export default function Home() {
 
       return isMastered;
     });
-
-    console.log("殿堂入り問題数:", mastered.length);
 
     setMasteredProblems(mastered);
     setSelectedMasteredIds([]);
@@ -2025,14 +2004,9 @@ export default function Home() {
               <div className="bg-blue-50 p-4 rounded-xl border-2 border-blue-300">
                 <button
                   onClick={() => {
-                    console.log("メッセージボタンがクリックされました");
-                    console.log("targetStudent:", targetStudent);
                     if (targetStudent) {
-                      console.log("モーダルを開きます");
                       setMessageTargetStudent(targetStudent);
                       setShowMessageModal(true);
-                    } else {
-                      console.log("targetStudentが設定されていません");
                     }
                   }}
                   className="w-full bg-blue-600 text-white p-4 rounded-xl font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center gap-2"
@@ -2798,7 +2772,7 @@ export default function Home() {
                 <button
                   onClick={() => {
                     setMode("edit");
-                    fetchAllProblemsForEdit();
+                    loadEditProblems();
                   }}
                   className="bg-gray-100 p-3 rounded-xl font-bold text-gray-600"
                 >
@@ -4322,7 +4296,6 @@ export default function Home() {
               </h3>
               <button
                 onClick={() => {
-                  console.log("モーダルを閉じます");
                   setShowMessageModal(false);
                   setMessageTargetStudent(null);
                   setMessageText("");
