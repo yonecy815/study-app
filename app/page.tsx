@@ -83,7 +83,6 @@ export default function Home() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showAnswer, setShowAnswer] = useState(false);
   const [finished, setFinished] = useState(false);
-  const [studyTitle, setStudyTitle] = useState("");
   const [exportData, setExportData] = useState<ExportRow[]>([]);
   const [maxResultCols, setMaxResultCols] = useState(0);
   const [exportStartDate, setExportStartDate] = useState(
@@ -160,7 +159,7 @@ export default function Home() {
       setSession(session);
       if (session) {
         // 管理者チェック
-        if (session.user.email === 'info@yonema.tokyo') {
+        if (session.user.email === process.env.NEXT_PUBLIC_SUPER_ADMIN_EMAIL) {
           setIsAdminMode(true);
         }
         fetchFolders(session.user.id);
@@ -177,7 +176,7 @@ export default function Home() {
       setSession(session);
       if (session) {
         // 管理者チェック
-        if (session.user.email === 'info@yonema.tokyo') {
+        if (session.user.email === process.env.NEXT_PUBLIC_SUPER_ADMIN_EMAIL) {
           setIsAdminMode(true);
         } else {
           setIsAdminMode(false);
@@ -230,7 +229,7 @@ export default function Home() {
 
   // ユーザーのプロフィールを取得
   const fetchUserProfile = async (userId: string) => {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("profiles")
       .select("*")
       .eq("id", userId)
@@ -1234,9 +1233,6 @@ export default function Home() {
         (p: Problem) =>
           !p.is_mastered && new Date(p.next_review_at) <= new Date(now)
       );
-      setStudyTitle(isHomework ? "🏠 今日の宿題 (特訓)" : "🔥 苦手特訓");
-    } else {
-      setStudyTitle(isHomework ? "🏠 今日の宿題 (全問)" : "📝 ランダム学習");
     }
 
     if (data.length === 0) {
@@ -1297,10 +1293,6 @@ export default function Home() {
     setFinished(false);
     setMode("study");
     setStatus("");
-  };
-
-  const startStudyWithSettings = () => {
-    setShowStudySettings(true);
   };
 
   // 殿堂入り判定関数
