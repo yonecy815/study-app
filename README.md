@@ -17,6 +17,7 @@
 - **宿題配信**: 特定のフォルダを今日の宿題として設定
 - **学習データ出力**: 生徒の学習履歴を期間・フォルダ別にエクスポート
 - **メッセージ送信**: 生徒個別にメッセージを送信
+- **パスワードリセット**: 生徒がパスワードを忘れた場合に担当先生がリセット可能
 - **カスタム暗証番号**: 先生モード用の独自パスワード設定
 
 ### 👨‍🎓 生徒機能
@@ -46,7 +47,10 @@
 NEXT_PUBLIC_SUPABASE_URL=your-supabase-url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
 NEXT_PUBLIC_SUPER_ADMIN_EMAIL=your-admin-email@example.com
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
+
+> `SUPABASE_SERVICE_ROLE_KEY` は Supabase ダッシュボードの **Settings → API → service_role** から取得できます。先生アカウントの作成・削除・生徒パスワードリセットに必要です。
 
 ### 2. データベースのセットアップ
 
@@ -125,6 +129,8 @@ npm run dev
 | **殿堂入りアルゴリズム** | 学習履歴を日付ごとに集計し、直近3日間の初回回答がすべて○かをクライアントサイドで判定 |
 | **問題割り当て設計** | `problems` テーブル（先生所有）と `student_problems` 中間テーブルで先生→生徒への配布を管理 |
 | **管理者専用API** | Next.js Route Handlers（`/api/create-teacher` 等）で Supabase Service Role Key を使用し、サーバーサイドでのみ先生アカウントを作成・削除 |
+| **パスワードリセット認証** | `/api/reset-student-password` でDBの `teacher_id` を照合し、担当先生または管理者のみリセットを許可 |
+| **React Context + コンポーネント分割** | 全状態管理を `AppContext` に集約。各画面を独立したコンポーネントファイルに分割（単一4400行 → 11行 + 17ファイル） |
 | **Row Level Security** | Supabase RLS により先生は自分の生徒のデータのみ、生徒は自分のデータのみアクセス可能 |
 
 ## 🔐 デフォルト設定
@@ -147,11 +153,28 @@ npm run dev
 study-app/
 ├── app/
 │   ├── api/
-│   │   ├── create-teacher/route.ts   # 先生アカウント作成（管理者専用）
-│   │   ├── update-teacher/route.ts   # 先生情報更新（管理者専用）
-│   │   └── delete-teacher/route.ts   # 先生削除（管理者専用）
-│   ├── layout.tsx          # レイアウト（フォント設定）
-│   ├── page.tsx            # メインアプリケーション
+│   │   ├── create-teacher/route.ts          # 先生アカウント作成（管理者専用）
+│   │   ├── update-teacher/route.ts          # 先生情報更新（管理者専用）
+│   │   ├── delete-teacher/route.ts          # 先生削除（管理者専用）
+│   │   └── reset-student-password/route.ts  # 生徒パスワードリセット（担当先生・管理者専用）
+│   ├── components/
+│   │   ├── AppShell.tsx            # ヘッダー・モーダル・画面ルーティング
+│   │   ├── LoginView.tsx           # ログイン・新規登録画面
+│   │   ├── MyPageView.tsx          # マイページ・先生設定
+│   │   ├── TeacherDashboard.tsx    # 先生モード生徒一覧
+│   │   ├── StudentDetailView.tsx   # 生徒詳細・問題割り当て・宿題設定
+│   │   ├── TeacherProblemsView.tsx # 先生の問題管理
+│   │   ├── StudyView.tsx           # 学習中画面
+│   │   ├── EditView.tsx            # 問題編集画面
+│   │   ├── ExportView.tsx          # データ出力画面
+│   │   ├── ImportView.tsx          # 問題インポート画面
+│   │   ├── StudentMenu.tsx         # 生徒メインメニュー
+│   │   └── modals/                 # 各種モーダル
+│   ├── context/
+│   │   └── AppContext.tsx          # 全状態管理・全ハンドラー（React Context）
+│   ├── layout.tsx          # レイアウト（フォント・メタデータ）
+│   ├── page.tsx            # エントリーポイント（11行）
+│   ├── types.ts            # 共通型定義
 │   └── globals.css         # グローバルスタイル
 ├── lib/
 │   └── supabaseClient.ts   # Supabase クライアント設定
@@ -169,6 +192,9 @@ study-app/
 - 暗証番号はハッシュ化せずに保存（教育用アプリのため）
 
 ## 🐛 トラブルシューティング
+
+### 生徒がパスワードを忘れた
+→ 先生の生徒詳細画面（生徒名をクリック）の「🔑 パスワードをリセット」から新しいパスワードを設定してください
 
 ### 招待コードが表示されない
 → 先生モードを一度解除し、再度ログインしてください
